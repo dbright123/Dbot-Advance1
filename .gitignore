@@ -1,0 +1,35 @@
+GBPUSD regressor.joblib
+GBPUSD sc_x.joblib
+GBPUSD sc_y.joblib
+USDCAD regressor.joblib
+USDCAD sc_x.joblib
+USDCAD sc_y.joblib
+XAUUSD regressor.joblib
+XAUUSD sc_x.joblib
+XAUUSD sc_y.joblib
+AUDUSD regressor.joblib
+AUDUSD sc_x.joblib
+AUDUSD sc_y.joblib
+EURUSD regressor.joblib
+EURUSD sc_x.joblib
+EURUSD sc_y.joblib
+USDCHF regressor.joblib
+USDCHF sc_x.joblib
+USDCHF sc_y.joblib
+USDCNH regressor.joblib
+USDCNH sc_x.joblib
+USDCNH sc_y.joblib
+NZDUSD regressor.joblib
+NZDUSD sc_x.joblib
+NZDUSD sc_y.joblib
+settings.iss
+settings.json
+Dbot_ML/*
+Dbot_ML
+Dbot Installer.exe
+v75i t_model.joblib
+v75i t_model.joblib
+*.csv
+*.csv
+GeneratedAUDUSD dbot.csv
+GeneratedXAUUSD dbot.csv
