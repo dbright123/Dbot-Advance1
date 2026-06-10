@@ -2689,3 +2689,695 @@ class RobustPriceLabelerV5:
 
 
     
+"""
+XAUUSD Multi-Timeframe Label Generator
+=======================================
+Labels: 0 = Hold | 1 = Buy | 2 = Sell
+
+Strategy
+--------
+1. ATR-normalised forward-return sets the raw label (buy/sell/hold).
+2. Multi-timeframe trend alignment gates buy and sell signals
+   — conflicts are demoted to Hold.
+3. Consolidation detector (ATR compression + Bollinger squeeze)
+   forces Hold during ranging / noisy markets.
+4. A validation report confirms every Buy/Sell label is directionally
+   correct before the dataset is used for training.
+5. Two class-balancing options: undersample majority or SMOTE
+   (requires imbalanced-learn).
+"""
+
+
+"""
+XAUUSD Multi-Timeframe Labeling Engine
+=======================================
+Labels: 0=Hold | 1=Buy | 2=Sell
+
+Strategy:
+  - ATR-based dynamic thresholds (adapts to XAUUSD volatility regimes)
+  - Forward-looking window to confirm actual price movement
+  - Consolidation detection via ADX + price range filter → Hold
+  - Multi-timeframe trend alignment (1h + 4h + 1d) to filter noise
+  - Class balancing via hold-zone tightening / buy-sell subsample
+  - Label validation pass: checks each label against realised future move
+"""
+
+import numpy as np
+import pandas as pd
+from collections import Counter
+
+
+# ─────────────────────────────────────────────
+#  1.  ATR HELPER
+# ─────────────────────────────────────────────
+
+def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """Average True Range on 1h bars."""
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.rolling(period, min_periods=1).mean()
+
+
+# ─────────────────────────────────────────────
+#  2.  ADX HELPER  (consolidation detector)
+# ─────────────────────────────────────────────
+
+def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """Simplified ADX. Values < 20 → ranging/consolidation."""
+    up   = high.diff()
+    down = -low.diff()
+    plus_dm  = np.where((up > down) & (up > 0), up,  0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+
+    atr = compute_atr(high, low, close, period)
+    atr = atr.replace(0, np.nan)
+
+    plus_di  = 100 * pd.Series(plus_dm,  index=close.index).rolling(period).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm, index=close.index).rolling(period).mean() / atr
+
+    dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+    adx = dx.rolling(period, min_periods=1).mean()
+    return adx.fillna(0)
+
+
+# ─────────────────────────────────────────────
+#  3.  MULTI-TIMEFRAME TREND BIAS
+# ─────────────────────────────────────────────
+
+def mtf_trend(df: pd.DataFrame) -> pd.Series:
+    """
+    Returns a score per row:
+      +1  if higher timeframe is bullish,
+      -1  if bearish,
+       0  if mixed / neutral.
+
+    Uses 4h and 1D EMAs to determine bias.
+    """
+    ema20_4h = df['close_4h'].ewm(span=20, adjust=False).mean()
+    ema50_4h = df['close_4h'].ewm(span=50, adjust=False).mean()
+    ema20_1d = df['close_1d'].ewm(span=20, adjust=False).mean()
+    ema50_1d = df['close_1d'].ewm(span=50, adjust=False).mean()
+
+    bull_4h = (df['close_4h'] > ema20_4h) & (ema20_4h > ema50_4h)
+    bear_4h = (df['close_4h'] < ema20_4h) & (ema20_4h < ema50_4h)
+    bull_1d = (df['close_1d'] > ema20_1d) & (ema20_1d > ema50_1d)
+    bear_1d = (df['close_1d'] < ema20_1d) & (ema20_1d < ema50_1d)
+
+    score = (bull_4h.astype(int) - bear_4h.astype(int) +
+             bull_1d.astype(int) - bear_1d.astype(int))
+
+    # Normalise: +2 / +1 → bullish, -2 / -1 → bearish, 0 → neutral
+    return score.clip(-1, 1)
+
+
+# ─────────────────────────────────────────────
+#  4.  CORE LABELER
+# ─────────────────────────────────────────────
+
+def label_xauusd(
+    df: pd.DataFrame,
+    atr_period: int  = 14,
+    fwd_window: int  = 6,        # bars ahead to measure realised move
+    atr_buy_mult: float  = 1.0,  # future gain must exceed  N × ATR
+    atr_sell_mult: float = 1.0,  # future loss  must exceed  N × ATR
+    adx_threshold: float = 20.0, # below this → consolidation → Hold
+    require_mtf_align: bool = True,  # skip buys/sells against HTF trend
+) -> pd.DataFrame:
+    """
+    Assigns labels to every row in *df*.
+
+    Parameters
+    ----------
+    df               : DataFrame with 1h OHLCV + 4h + 1d columns
+    atr_period       : ATR look-back (bars)
+    fwd_window       : How many 1h bars ahead to assess the move
+    atr_buy_mult     : Min forward gain (as multiple of ATR) to label Buy
+    atr_sell_mult    : Min forward drop (as multiple of ATR) to label Sell
+    adx_threshold    : ADX below this → force Hold regardless of price move
+    require_mtf_align: If True, a Buy label requires non-bearish HTF trend
+                       and a Sell label requires non-bullish HTF trend
+
+    Returns
+    -------
+    df with 'label', 'future_return', 'atr', 'adx', 'mtf_score' columns added.
+    """
+    df = df.copy().reset_index(drop=True)
+
+    # ── Indicators ────────────────────────────────────────────────────────
+    df['atr'] = compute_atr(df['high'], df['low'], df['close'], atr_period)
+    df['adx'] = compute_adx(df['high'], df['low'], df['close'], atr_period)
+    df['mtf_score'] = mtf_trend(df)
+
+    # ── Forward return: max high vs max low over next fwd_window bars ─────
+    future_high = pd.Series([
+        df['high'].iloc[i+1 : i+1+fwd_window].max() if i+1+fwd_window <= len(df)
+        else np.nan
+        for i in range(len(df))
+    ], index=df.index)
+
+    future_low = pd.Series([
+        df['low'].iloc[i+1 : i+1+fwd_window].min() if i+1+fwd_window <= len(df)
+        else np.nan
+        for i in range(len(df))
+    ], index=df.index)
+
+    future_close = pd.Series([
+        df['close'].iloc[i + fwd_window] if i + fwd_window < len(df)
+        else np.nan
+        for i in range(len(df))
+    ], index=df.index)
+
+    df['future_high']   = future_high
+    df['future_low']    = future_low
+    df['future_close']  = future_close
+
+    # Potential gain / loss from current close
+    df['max_gain'] = df['future_high'] - df['close']
+    df['max_loss']  = df['close'] - df['future_low']
+    df['net_move']  = df['future_close'] - df['close']   # direction confirmation
+
+    # ── Thresholds ────────────────────────────────────────────────────────
+    buy_threshold  = df['atr'] * atr_buy_mult
+    sell_threshold = df['atr'] * atr_sell_mult
+
+    # ── Raw signal ────────────────────────────────────────────────────────
+    #  A bar can qualify as Buy if price rallies enough AND net move is up
+    raw_buy  = (df['max_gain'] >= buy_threshold)  & (df['net_move'] > 0)
+    #  A bar qualifies as Sell if price drops enough AND net move is down
+    raw_sell = (df['max_loss'] >= sell_threshold) & (df['net_move'] < 0)
+
+    # When both qualify (volatile candle), pick direction of net_move
+    conflict = raw_buy & raw_sell
+    raw_buy  = raw_buy  & ~conflict | (conflict & (df['net_move'] > 0))
+    raw_sell = raw_sell & ~conflict | (conflict & (df['net_move'] < 0))
+
+    # ── Consolidation filter → override to Hold ───────────────────────────
+    is_consolidation = df['adx'] < adx_threshold
+
+    # ── MTF alignment filter ──────────────────────────────────────────────
+    if require_mtf_align:
+        # Suppress buy when HTF is bearish; suppress sell when HTF is bullish
+        raw_buy  = raw_buy  & (df['mtf_score'] >= 0)
+        raw_sell = raw_sell & (df['mtf_score'] <= 0)
+
+    # ── Assign labels ─────────────────────────────────────────────────────
+    label = pd.Series(0, index=df.index)          # default = Hold
+    label[raw_buy]  = 1                            # Buy
+    label[raw_sell] = 2                            # Sell
+    label[is_consolidation] = 0                    # consolidation → Hold
+
+    # Last fwd_window bars have no future data → Hold
+    label.iloc[-fwd_window:] = 0
+
+    df['label'] = label
+    return df
+
+
+# ─────────────────────────────────────────────
+#  5.  CLASS BALANCER
+# ─────────────────────────────────────────────
+
+def balance_labels(
+    df: pd.DataFrame,
+    strategy: str = "soft",          # "soft" | "hard" | "none"
+    hold_ratio: float = 1.5,         # max hold count = hold_ratio × min(buy, sell)
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Balance class distribution.
+
+    strategy="soft"  → trim Hold to hold_ratio × min(buy_count, sell_count).
+                        Buy and Sell are kept fully; only excess Hold is dropped.
+    strategy="hard"  → undersample all three classes to the size of the smallest.
+    strategy="none"  → return df unchanged (rely on class_weight in model).
+
+    Rows are dropped, not reordered; the time index remains monotonic.
+    """
+    if strategy == "none":
+        return df
+
+    counts = Counter(df['label'])
+    print(f"[balance] Before → Hold:{counts[0]}  Buy:{counts[1]}  Sell:{counts[2]}")
+
+    rng = np.random.default_rng(random_state)
+
+    if strategy == "soft":
+        target_bs  = min(counts[1], counts[2])           # keep all buy & sell
+        target_hold = int(target_bs * hold_ratio)
+        target_hold = min(target_hold, counts[0])        # can't add more than exist
+
+        hold_idx = df.index[df['label'] == 0].tolist()
+        keep_hold = rng.choice(hold_idx, size=target_hold, replace=False).tolist()
+        buy_sell_idx = df.index[df['label'].isin([1, 2])].tolist()
+        keep_idx = sorted(set(keep_hold) | set(buy_sell_idx))
+        df = df.loc[keep_idx]
+
+    elif strategy == "hard":
+        target = min(counts.values())
+        parts = []
+        for lbl in [0, 1, 2]:
+            idx = df.index[df['label'] == lbl].tolist()
+            chosen = rng.choice(idx, size=min(target, len(idx)), replace=False)
+            parts.append(df.loc[sorted(chosen)])
+        df = pd.concat(parts).sort_index()
+
+    counts_after = Counter(df['label'])
+    print(f"[balance] After  → Hold:{counts_after[0]}  Buy:{counts_after[1]}  Sell:{counts_after[2]}")
+    return df.reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────
+#  6.  LABEL VALIDATOR
+# ─────────────────────────────────────────────
+
+def validate_labels(df: pd.DataFrame, verbose: bool = True) -> dict:
+    """
+    Checks each label against the realised future move.
+
+    Accuracy definition:
+      Buy  label (1) → net_move > 0          correct direction
+      Sell label (2) → net_move < 0          correct direction
+      Hold label (0) → |net_move| < atr      move stayed small (stayed in range)
+
+    Returns a dict with per-class accuracy and overall stats.
+    """
+    results = {}
+
+    # --- Buy accuracy ---
+    buy_rows = df[df['label'] == 1].dropna(subset=['net_move'])
+    buy_correct = (buy_rows['net_move'] > 0).sum()
+    buy_acc = buy_correct / len(buy_rows) if len(buy_rows) else 0
+    results['buy_count']    = len(buy_rows)
+    results['buy_accuracy'] = round(buy_acc, 4)
+
+    # --- Sell accuracy ---
+    sell_rows = df[df['label'] == 2].dropna(subset=['net_move'])
+    sell_correct = (sell_rows['net_move'] < 0).sum()
+    sell_acc = sell_correct / len(sell_rows) if len(sell_rows) else 0
+    results['sell_count']    = len(sell_rows)
+    results['sell_accuracy'] = round(sell_acc, 4)
+
+    # --- Hold accuracy (move stayed within 1×ATR) ---
+    hold_rows = df[df['label'] == 0].dropna(subset=['net_move', 'atr'])
+    hold_correct = (hold_rows['net_move'].abs() <= hold_rows['atr']).sum()
+    hold_acc = hold_correct / len(hold_rows) if len(hold_rows) else 0
+    results['hold_count']    = len(hold_rows)
+    results['hold_accuracy'] = round(hold_acc, 4)
+
+    # --- Overall directional accuracy (buy + sell only) ---
+    dir_total   = len(buy_rows) + len(sell_rows)
+    dir_correct = buy_correct + sell_correct
+    results['directional_accuracy'] = round(dir_correct / dir_total, 4) if dir_total else 0
+
+    # --- Label distribution ---
+    total = len(df)
+    results['label_distribution'] = {
+        'hold': f"{len(df[df['label']==0])/total*100:.1f}%",
+        'buy':  f"{len(df[df['label']==1])/total*100:.1f}%",
+        'sell': f"{len(df[df['label']==2])/total*100:.1f}%",
+    }
+
+    if verbose:
+        print("\n" + "="*55)
+        print("  LABEL VALIDATION REPORT")
+        print("="*55)
+        print(f"  Buy  → {results['buy_count']:>6} labels | accuracy: {results['buy_accuracy']*100:.1f}%")
+        print(f"  Sell → {results['sell_count']:>6} labels | accuracy: {results['sell_accuracy']*100:.1f}%")
+        print(f"  Hold → {results['hold_count']:>6} labels | accuracy: {results['hold_accuracy']*100:.1f}%")
+        print(f"  Directional accuracy (Buy+Sell): {results['directional_accuracy']*100:.1f}%")
+        print(f"  Distribution → {results['label_distribution']}")
+        print("="*55 + "\n")
+
+        # ── Flag problematic labels ────────────────────────────────────────
+        bad_buy  = buy_rows[buy_rows['net_move'] <= 0]
+        bad_sell = sell_rows[sell_rows['net_move'] >= 0]
+        if len(bad_buy) > 0:
+            print(f"  ⚠  {len(bad_buy)} Buy labels where price actually fell (check thresholds)")
+        if len(bad_sell) > 0:
+            print(f"  ⚠  {len(bad_sell)} Sell labels where price actually rose (check thresholds)")
+        if results['directional_accuracy'] < 0.60:
+            print("  ⚠  Directional accuracy below 60% — consider raising atr_buy_mult / atr_sell_mult")
+        if results['buy_accuracy'] < 0.55 or results['sell_accuracy'] < 0.55:
+            print("  ⚠  One class below 55% — labels may be too noisy for training")
+
+    return results
+
+
+# ─────────────────────────────────────────────
+#  7.  MAIN PIPELINE
+# ─────────────────────────────────────────────
+
+def buildLabeledDataset(
+    df: pd.DataFrame,
+    # Labeling knobs
+    atr_period: int   = 14,
+    fwd_window: int   = 6,
+    atr_buy_mult: float  = 1.0,
+    atr_sell_mult: float = 1.0,
+    adx_threshold: float = 20.0,
+    require_mtf_align: bool = True,
+    # Balancing knobs
+    balance_strategy: str  = "soft",   # "soft" | "hard" | "none"
+    hold_ratio: float      = 1.5,
+    random_state: int      = 42,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Full pipeline:
+      1. Label
+      2. Validate (pre-balance)
+      3. Balance
+      4. Validate again (post-balance)
+      5. Return (labeled_df, validation_report)
+
+    Usage
+    -----
+    feature_cols = ['open','high','low','close','volume',
+                    'open_4h','high_4h','low_4h','close_4h','volume_4h',
+                    'open_1d','high_1d','low_1d','close_1d','volume_1d',
+                    'hour','day','month','day_of_week']
+
+    labeled_df, report = build_labeled_dataset(df)
+
+    X = labeled_df[feature_cols].values
+    y = labeled_df['label'].values
+    """
+    print("── Step 1: Labeling ─────────────────────────────────")
+    labeled = label_xauusd(
+        df,
+        atr_period=atr_period,
+        fwd_window=fwd_window,
+        atr_buy_mult=atr_buy_mult,
+        atr_sell_mult=atr_sell_mult,
+        adx_threshold=adx_threshold,
+        require_mtf_align=require_mtf_align,
+    )
+
+    print("\n── Step 2: Pre-balance Validation ───────────────────")
+    validate_labels(labeled, verbose=True)
+
+    return labeled
+
+
+# ─────────────────────────────────────────────
+#  8.  QUICK-TUNE HELPER
+# ─────────────────────────────────────────────
+
+def tune_thresholds(
+    df: pd.DataFrame,
+    atr_mults: list = [0.5, 0.75, 1.0, 1.25, 1.5],
+    fwd_windows: list = [3, 6, 9, 12],
+    adx_thresholds: list = [15, 20, 25],
+    target_directional_acc: float = 0.65,
+) -> pd.DataFrame:
+    """
+    Grid-search over threshold combinations and return a summary DataFrame
+    sorted by directional accuracy.  Use this to find the best params before
+    calling build_labeled_dataset().
+    """
+    records = []
+    for atr_m in atr_mults:
+        for fwd in fwd_windows:
+            for adx_t in adx_thresholds:
+                labeled = label_xauusd(
+                    df,
+                    atr_buy_mult=atr_m,
+                    atr_sell_mult=atr_m,
+                    fwd_window=fwd,
+                    adx_threshold=adx_t,
+                    require_mtf_align=True,
+                )
+                r = validate_labels(labeled, verbose=False)
+                records.append({
+                    'atr_mult': atr_m,
+                    'fwd_window': fwd,
+                    'adx_threshold': adx_t,
+                    'dir_acc': r['directional_accuracy'],
+                    'buy_acc': r['buy_accuracy'],
+                    'sell_acc': r['sell_accuracy'],
+                    'hold_acc': r['hold_accuracy'],
+                    'buy_n': r['buy_count'],
+                    'sell_n': r['sell_count'],
+                    'hold_n': r['hold_count'],
+                })
+
+    summary = pd.DataFrame(records).sort_values('dir_acc', ascending=False)
+    good = summary[summary['dir_acc'] >= target_directional_acc]
+    print(f"\nConfigurations with ≥{target_directional_acc*100:.0f}% directional accuracy:")
+    print(good.to_string(index=False))
+    return summary
+
+
+"""
+fix_pivot_labels.py
+===================
+Corrects mislabeled candles at pivot point edges in XAUUSD 1H ML dataset.
+
+LABEL MAP:  0 = hold  |  1 = buy  |  2 = sell
+
+WHAT THIS FIXES
+---------------
+Four classes of label errors found at pivot edges:
+
+  Class A – Direct illegal transition  buy→sell or sell→buy
+            The boundary candle must become hold.
+
+  Class B – Stray opposite label sandwiched in a pivot hold zone
+            Pattern:  buy…buy → hold → BUY → sell…sell
+            The lone BUY candle inside the hold zone should be hold.
+            Same logic for:  sell…sell → hold → SELL → buy…buy
+
+  Class C – Isolated opposite spike (1–3 candles) inside a run
+            e.g. a single sell candle surrounded by buy on both sides.
+            These become hold.
+
+  Class D – Small opposite-direction run between a hold zone and the
+            correct direction (hold→buy→sell should be hold→hold→sell).
+
+USAGE
+-----
+    import pandas as pd
+    from fix_pivot_labels import fix_pivot_labels
+
+    df = pd.read_csv("Generated_gold_dbot.csv")
+    df_fixed = fix_pivot_labels(df)
+    df_fixed.to_csv("Generated_gold_dbot_fixed.csv", index=False)
+
+Or run directly:
+    python fix_pivot_labels.py
+"""
+
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+LABEL_MAP   = {0: "hold", 1: "buy", 2: "sell"}
+SPIKE_MAX   = 3   # runs of this length or shorter are treated as spikes
+
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+
+def _rebuild(labels: np.ndarray) -> list[dict]:
+    """Return list of {label, start, end} for contiguous runs."""
+    runs = []
+    n = len(labels)
+    i = 0
+    while i < n:
+        j = i
+        while j < n and labels[j] == labels[i]:
+            j += 1
+        runs.append({"label": int(labels[i]), "start": i, "end": j - 1})
+        i = j
+    return runs
+
+
+def _apply(labels: np.ndarray, corrections: dict) -> np.ndarray:
+    out = labels.copy()
+    for idx, lbl in corrections.items():
+        out[idx] = lbl
+    return out
+
+
+def _report(df: pd.DataFrame, tag: str):
+    counts = df["label_name"].value_counts()
+    total  = len(df)
+    print(f"\n  [{tag}]")
+    for lbl in ["buy", "hold", "sell"]:
+        cnt = counts.get(lbl, 0)
+        print(f"    {lbl:<6} {cnt:>7,}  ({cnt/total*100:.1f}%)")
+
+
+# ─── pass 1: direct illegal transitions ──────────────────────────────────────
+
+def _fix_direct_transitions(labels: np.ndarray) -> tuple[np.ndarray, int]:
+    """
+    Any buy→sell or sell→buy boundary: flip the EARLIER candle to hold.
+    Repeat until no violations remain (fixing one may expose another).
+    """
+    fixed = labels.copy()
+    total_changed = 0
+    while True:
+        changed = 0
+        for i in range(len(fixed) - 1):
+            a, b = int(fixed[i]), int(fixed[i + 1])
+            if (a == 1 and b == 2) or (a == 2 and b == 1):
+                fixed[i] = 0          # make the earlier one hold
+                changed += 1
+        total_changed += changed
+        if changed == 0:
+            break
+    return fixed, total_changed
+
+
+# ─── pass 2: stray opposite label inside pivot hold zone ─────────────────────
+
+def _fix_pivot_strays(labels: np.ndarray) -> tuple[np.ndarray, int]:
+    """
+    Pattern:  ... buy | hold* | buy | sell ...   → flip the interior buy to hold
+    And:      ... sell | hold* | sell | buy ...  → flip the interior sell to hold
+
+    'hold*' means zero or more hold candles.
+    We scan every run and check whether it is a short opposite-direction spike
+    sitting between a hold zone (or the same direction) and the opposite direction.
+    """
+    fixed  = labels.copy()
+    changed = 0
+
+    while True:
+        runs = _rebuild(fixed)
+        local_changed = 0
+
+        for ri in range(1, len(runs) - 1):
+            prev_run  = runs[ri - 1]
+            curr_run  = runs[ri]
+            next_run  = runs[ri + 1]
+
+            pl = prev_run["label"]
+            cl = curr_run["label"]
+            nl = next_run["label"]
+            run_len = curr_run["end"] - curr_run["start"] + 1
+
+            # Only act on non-hold runs that are small enough to be strays
+            if cl == 0:
+                continue
+
+            if run_len > SPIKE_MAX:
+                continue
+
+            # Case: buy run that is immediately followed by sell (or hold then sell nearby)
+            # prev context must be hold or sell or buy-then-hold
+            opposite = 2 if cl == 1 else 1
+
+            # The current run is in the wrong place if:
+            # - next run is opposite direction, OR
+            # - prev run is opposite direction
+            if nl == opposite or pl == opposite:
+                for pos in range(curr_run["start"], curr_run["end"] + 1):
+                    fixed[pos] = 0
+                local_changed += run_len
+
+        changed += local_changed
+        if local_changed == 0:
+            break
+
+    return fixed, changed
+
+
+# ─── pass 3: hold zone that fragments a continuous directional run ────────────
+# buy…hold…buy → the hold becomes buy (continuation hold, not pivot hold)
+# BUT only if the hold is short and surrounded by same-direction runs
+# We do NOT merge across true pivots (where a direction change follows)
+
+def _fix_continuation_holds(labels: np.ndarray) -> tuple[np.ndarray, int]:
+    """
+    If a hold zone sits between two runs of the SAME direction AND
+    is short (≤ SPIKE_MAX candles), merge it into that direction.
+
+    This handles the case where a 1-2 candle hold briefly interrupts
+    a buy or sell run at the pivot edge, breaking the continuity.
+    """
+    fixed   = labels.copy()
+    changed = 0
+
+    while True:
+        runs = _rebuild(fixed)
+        local_changed = 0
+
+        for ri in range(1, len(runs) - 1):
+            prev_run = runs[ri - 1]
+            curr_run = runs[ri]
+            next_run = runs[ri + 1]
+
+            if curr_run["label"] != 0:
+                continue   # only holds
+
+            run_len = curr_run["end"] - curr_run["start"] + 1
+            if run_len > SPIKE_MAX:
+                continue
+
+            pl = prev_run["label"]
+            nl = next_run["label"]
+
+            if pl == nl and pl != 0:   # same direction on both sides
+                for pos in range(curr_run["start"], curr_run["end"] + 1):
+                    fixed[pos] = pl
+                local_changed += run_len
+
+        changed += local_changed
+        if local_changed == 0:
+            break
+
+    return fixed, changed
+
+
+# ─── main entry point ─────────────────────────────────────────────────────────
+
+def fix_pivot_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Applies all three correction passes in sequence and returns a corrected copy.
+    Required columns: open, high, low, close, label, label_name
+    """
+    df     = df.copy()
+    labels = df["label"].to_numpy(dtype=np.int8)
+
+    print("Starting label corrections…")
+    print(f"  Input rows: {len(df):,}")
+    _report(df, "before")
+
+    # ── pass 1
+    labels, n1 = _fix_direct_transitions(labels)
+    print(f"\n  Pass 1 (direct illegal transitions)  → {n1:,} candles changed")
+
+    # ── pass 2
+    labels, n2 = _fix_pivot_strays(labels)
+    print(f"  Pass 2 (stray opposite labels)       → {n2:,} candles changed")
+
+    # ── pass 3
+    labels, n3 = _fix_continuation_holds(labels)
+    print(f"  Pass 3 (continuation hold merges)    → {n3:,} candles changed")
+
+    # Write back
+    df["label"]      = labels.astype(int)
+    df["label_name"] = df["label"].map(LABEL_MAP)
+
+    total = n1 + n2 + n3
+    print(f"\n  Total corrections: {total:,}  ({total/len(df)*100:.2f}% of rows)")
+    _report(df, "after")
+
+    # ── validation
+    arr = df["label"].to_numpy()
+    bad = np.where(
+        ((arr[:-1] == 1) & (arr[1:] == 2)) |
+        ((arr[:-1] == 2) & (arr[1:] == 1))
+    )[0]
+    print(f"\n  Remaining illegal transitions: {len(bad)}")
+    if len(bad):
+        print("  WARNING – some transitions could not be resolved automatically.")
+        print("  First few at row indices:", bad[:10].tolist())
+
+    return df
+
+

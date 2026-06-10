@@ -16,12 +16,13 @@ from extra_function import RobustPriceLabelerV4, RobustPriceLabelerV5
 # ─────────────────────────────────────────────
 # Parse CLI arguments — no more input() prompts
 # ─────────────────────────────────────────────
+
 parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrader 5")
 parser.add_argument("--terminal",  required=True,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
 parser.add_argument("--symbol",    required=True,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
-parser.add_argument("--retrain-interval", type=int, default=(60 * 24), help="Minutes between automatic retrains  (default: 60)")
-args = parser.parse_args()
+parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
+args = parser.parse_args()   
 
 # ─────────────────────────────────────────────
 # App & globals
