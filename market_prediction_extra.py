@@ -13,6 +13,7 @@ from flask_cors import CORS
 import MetaTrader5 as mt5
 from extra_function import RobustPriceLabelerV3, engineer_features, plot_signals, predict_and_plot_signals
 from extra_function import RobustPriceLabelerV4, RobustPriceLabelerV5
+from imblearn.under_sampling import RandomUnderSampler
 
 from extra_function import fix_pivot_labels
 
@@ -129,7 +130,7 @@ def _run_training():
             target_hold_pct = 0.01 ,
         )
         df = labeler.label(df)
-
+        
         # ── Train / test split ──────────────────────
         X = df[FEATURE_NAMES].values
         y = df['label'].values
@@ -138,11 +139,15 @@ def _run_training():
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.1, random_state=42, stratify=y
         )
+        print("Before:", y_train.shape)
+        rus = RandomUnderSampler(random_state=42)
+        X_train, y_train = rus.fit_resample(X_train, y_train)
+        print("After: ", y_train.shape)
         del X, y
 
         # ── Fit new model ───────────────────────────
         new_model = RandomForestClassifier(
-            n_estimators=350, n_jobs=2, random_state=42, verbose=0
+            n_estimators=350,random_state=42,class_weight='balanced', verbose=1
         )
         new_model.fit(X_train, y_train)
         del X_train, y_train

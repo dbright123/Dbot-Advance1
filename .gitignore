@@ -33,3 +33,4 @@ v75i t_model.joblib
 *.csv
 GeneratedAUDUSD dbot.csv
 GeneratedXAUUSD dbot.csv
+*.exe

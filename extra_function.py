@@ -614,6 +614,8 @@ def plot_signals(df):
     print(f"Sell Signals (2): {len(df[df['label'] == 2])}")
 
 
+
+
 import matplotlib.pyplot as plt
 
 def predict_and_plot_signals(model, df, feature_columns):
@@ -3340,7 +3342,7 @@ def fix_pivot_labels(df: pd.DataFrame) -> pd.DataFrame:
     Applies all three correction passes in sequence and returns a corrected copy.
     Required columns: open, high, low, close, label, label_name
     """
-    df     = df.copy()
+    #df     = df.copy()
     labels = df["label"].to_numpy(dtype=np.int8)
 
     print("Starting label corrections…")
