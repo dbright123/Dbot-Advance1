@@ -57,48 +57,51 @@ next_train_at        = None          # datetime of next scheduled train
 training_error       = None          # last error message, if any
 
 
-# ─────────────────────────────────────────────
-# Multi-timeframe data helpers  (from notebook)
-# ─────────────────────────────────────────────
-def _fetch_rates(symbol: str, timeframe, count: int = 9_000_000) -> pd.DataFrame:
-    """Pull rates from MT5 for a single timeframe, return a tidy DataFrame.
+import MetaTrader5 as mt5
+import pandas as pd
 
-    Handles whatever column name MT5 uses for volume (real_volume vs tick_volume).
-    """
+def fetch_rates(symbol, timeframe, count=9_000_000):
+    """Pull rates from MT5 and return a tidy DataFrame."""
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
-    if rates is None or len(rates) == 0:
-        raise ValueError(
-            f"MT5 returned no data for {symbol} TF={timeframe}. "
-            f"Error: {mt5.last_error()}"
-        )
-
+    
+    if rates is None:
+        raise ValueError(f"MT5 returned None for {symbol}. Error: {mt5.last_error()}")
+    
     df = pd.DataFrame(rates)
-    print(f"    {symbol} TF={timeframe}: {len(df):,} bars, columns={list(df.columns)}")
-
-    # Detect whichever volume column MT5 provided
+    
+    # ── Debug: show what columns MT5 actually gave us ──────────────────────
+    print(f"Available columns: {list(df.columns)}")
+    
+    # ── Grab volume column whatever it is called ────────────────────────────
     vol_col = next((c for c in df.columns if "volume" in c.lower()), None)
     if vol_col is None:
         raise KeyError(f"No volume column found among: {list(df.columns)}")
-
+    
     df = df[["time", "open", "high", "low", "close", vol_col]].copy()
     df.rename(columns={vol_col: "volume"}, inplace=True)
-    return df.sort_values("time")
+    #df["time"] = pd.to_datetime(df["time"], unit="s")
+    return df.set_index("time")
 
 
-def _build_multi_tf(symbol: str) -> pd.DataFrame:
-    """Fetch H1, H4, and D1 bars then merge them with merge_asof (notebook logic)."""
-    df_1h = _fetch_rates(symbol, mt5.TIMEFRAME_H1)
-    df_4h = _fetch_rates(symbol, mt5.TIMEFRAME_H4)
-    df_1d = _fetch_rates(symbol, mt5.TIMEFRAME_D1)
+def build_multi_tf(symbol):
+    if not mt5.initialize(r"C:\Program Files\HFM MetaTrader 5\terminal64.exe"):
+        raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
-    # Tag lower-resolution frames so their columns don't clash with H1
-    def _tag(df: pd.DataFrame, suffix: str) -> pd.DataFrame:
-        return df.rename(columns={c: f"{c}_{suffix}" for c in df.columns if c != "time"})
+    df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1).reset_index()
+    df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4).reset_index()
+    df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1).reset_index()
 
-    df_4h = _tag(df_4h, "4h")
-    df_1d = _tag(df_1d, "1d")
+    def tag_and_shift(df, suffix):
+        df = df.sort_values("time").rename(
+            columns={c: f"{c}_{suffix}" for c in df.columns if c != "time"})
+        val_cols = [c for c in df.columns if c != "time"]
+        df[val_cols] = df[val_cols].shift(1)      # <-- only use CLOSED bars
+        return df
 
-    # merge_asof requires both sides sorted on the key
+    df_4h = tag_and_shift(df_4h, "4h")
+    df_1d = tag_and_shift(df_1d, "1d")
+    df_1h = df_1h.sort_values("time")
+
     merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
     return merged
@@ -115,7 +118,7 @@ def _run_training():
 
     try:
         # ── Fetch & merge multi-timeframe data ──────────────────────────────
-        df = _build_multi_tf(args.symbol)
+        df = build_multi_tf(args.symbol)
         print(f"  Multi-TF merge complete: {len(df):,} rows, {len(df.columns)} columns")
 
         # ── Feature engineering ─────────────────────
@@ -140,9 +143,10 @@ def _run_training():
             X, y, test_size=0.1, random_state=42, stratify=y
         )
         print("Before:", y_train.shape)
-        rus = RandomUnderSampler(random_state=42)
+        """        rus = RandomUnderSampler(random_state=42)
         X_train, y_train = rus.fit_resample(X_train, y_train)
-        print("After: ", y_train.shape)
+        print("After: ", y_train.shape)"""
+
         del X, y
 
         # ── Fit new model ───────────────────────────
