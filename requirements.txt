@@ -1,0 +1,13 @@
+beautifulsoup4
+Flask
+flask_cors
+imblearn
+joblib
+matplotlib
+MetaTrader5
+numpy
+pandas
+Requests
+scikit_learn
+seaborn
+
