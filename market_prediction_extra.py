@@ -22,9 +22,9 @@ from extra_function import fix_pivot_labels
 # ─────────────────────────────────────────────
 
 parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrader 5")
-parser.add_argument("--terminal",  required=True,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
-parser.add_argument("--symbol",    required=True,  help="Trading symbol to fetch data for  e.g. XAUUSD")
-parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
+parser.add_argument("--terminal",  default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
+parser.add_argument("--symbol",  default="XAUUSD", help="Trading symbol to fetch data for  e.g. XAUUSD")
+parser.add_argument("--port", type=int, default=5000, help="Port for the Flask server  (default: 5000)")
 parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
 args = parser.parse_args()   
 
@@ -84,7 +84,7 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
 
 
 def build_multi_tf(symbol):
-    if not mt5.initialize(r"C:\Program Files\HFM MetaTrader 5\terminal64.exe"):
+    if not mt5.initialize(r"C:\Program Files\MetaTrader 5\terminal64.exe"):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
     df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1).reset_index()
