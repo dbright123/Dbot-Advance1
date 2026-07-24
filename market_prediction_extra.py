@@ -84,7 +84,7 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
 
 
 def build_multi_tf(symbol):
-    if not mt5.initialize(r"C:\Program Files\HFM MetaTrader 5\terminal64.exe"):
+    if not mt5.initialize(args.terminal):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
     df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1).reset_index()
@@ -151,7 +151,7 @@ def _run_training():
 
         # ── Fit new model ───────────────────────────
         new_model = RandomForestClassifier(
-            n_estimators=350,random_state=42,class_weight='balanced', verbose=1
+            n_estimators=350,random_state=42,class_weight='balanced', verbose=1, n_jobs=-1
         )
         new_model.fit(X_train, y_train)
         del X_train, y_train
