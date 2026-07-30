@@ -64,6 +64,9 @@ training_in_progress = False
 last_trained_at      = None          # datetime of last successful train
 next_train_at        = None          # datetime of next scheduled train
 training_error       = None          # last error message, if any
+train_started_at     = None          # datetime the current/last train started
+last_train_seconds   = 90.0          # measured duration of the last train (for ETA)
+last_accuracy        = 0.0           # hold-out accuracy of the active model (0-1)
 
 
 import MetaTrader5 as mt5
@@ -97,13 +100,19 @@ def build_multi_tf(symbol, bars=None):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
     if bars:
-        n1, n4, n1d = bars, max(80, bars // 4 + 20), max(40, bars // 24 + 20)
+        n_b  = bars
+        n_30 = max(120, bars // 2 + 30)
+        n_h1 = max(80,  bars // 4 + 20)
+        n_h4 = max(60,  bars // 16 + 20)
+        n_1d = max(40,  bars // 96 + 20)
     else:
-        n1 = n4 = n1d = 9_000_000
+        n_b = n_30 = n_h1 = n_h4 = n_1d = 9_000_000
 
-    df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1, n1).reset_index()
-    df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4, n4).reset_index()
-    df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1, n1d).reset_index()
+    df_base = fetch_rates(symbol, mt5.TIMEFRAME_M15, n_b).reset_index()   # base = 15-minute
+    df_30   = fetch_rates(symbol, mt5.TIMEFRAME_M30, n_30).reset_index()
+    df_1h   = fetch_rates(symbol, mt5.TIMEFRAME_H1,  n_h1).reset_index()
+    df_4h   = fetch_rates(symbol, mt5.TIMEFRAME_H4,  n_h4).reset_index()
+    df_1d   = fetch_rates(symbol, mt5.TIMEFRAME_D1,  n_1d).reset_index()
 
     def tag_and_shift(df, suffix):
         df = df.sort_values("time").rename(
@@ -112,11 +121,15 @@ def build_multi_tf(symbol, bars=None):
         df[val_cols] = df[val_cols].shift(1)      # <-- only use CLOSED bars
         return df
 
-    df_4h = tag_and_shift(df_4h, "4h")
+    df_30 = tag_and_shift(df_30, "m30")
+    df_1h = tag_and_shift(df_1h, "h1")
+    df_4h = tag_and_shift(df_4h, "h4")
     df_1d = tag_and_shift(df_1d, "1d")
-    df_1h = df_1h.sort_values("time")
+    df_base = df_base.sort_values("time")
 
-    merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
+    merged = pd.merge_asof(df_base, df_30, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_1h, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_4h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
     return merged
 
@@ -127,13 +140,15 @@ def build_multi_tf(symbol, bars=None):
 ENG_FEATURES = [
     "ret1", "ret3", "ret6", "ret12", "ret24", "rng", "body", "upwick", "lowick",
     "c_sma20", "c_sma50", "sma20_50", "vol20", "atr_pct", "rsi", "vchg",
-    "c_vs_4h", "c_vs_1d", "h4_ret", "d1_ret",
-    "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+    "c_vs_m30", "c_vs_h1", "c_vs_h4", "c_vs_1d",
+    "m30_ret", "h1_ret", "h4_ret", "d1_ret",
+    "min_sin", "min_cos", "hour_sin", "hour_cos", "dow_sin", "dow_cos",
 ]
 
 
 def add_calendar(df):
     t = pd.to_datetime(df["time"], unit="s", errors="coerce")
+    df["minute"] = t.dt.minute
     df["month"] = t.dt.month
     df["day"] = t.dt.day
     df["hour"] = t.dt.hour
@@ -142,7 +157,7 @@ def add_calendar(df):
 
 
 def add_engineered_features(df):
-    """Stationary features that generalise across price levels."""
+    """Stationary features across M15 base + M30/H1/H4/D1 context."""
     eps = 1e-9
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]
     v = df["volume"].astype(float)
@@ -173,11 +188,17 @@ def add_engineered_features(df):
     df["rsi"] = (100 - 100 / (1 + up / (dn + eps))) / 100.0
 
     df["vchg"] = v.pct_change().clip(-5, 5)
-    df["c_vs_4h"] = c / (df["close_4h"] + eps) - 1
+    df["c_vs_m30"] = c / (df["close_m30"] + eps) - 1
+    df["c_vs_h1"] = c / (df["close_h1"] + eps) - 1
+    df["c_vs_h4"] = c / (df["close_h4"] + eps) - 1
     df["c_vs_1d"] = c / (df["close_1d"] + eps) - 1
-    df["h4_ret"] = df["close_4h"].pct_change()
+    df["m30_ret"] = df["close_m30"].pct_change()
+    df["h1_ret"] = df["close_h1"].pct_change()
+    df["h4_ret"] = df["close_h4"].pct_change()
     df["d1_ret"] = df["close_1d"].pct_change()
 
+    df["min_sin"] = np.sin(2 * np.pi * df["minute"] / 60)
+    df["min_cos"] = np.cos(2 * np.pi * df["minute"] / 60)
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["dow_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
@@ -222,10 +243,12 @@ def build_predict_row(symbol, feats):
 # Core training routine (runs in bg thread)
 # ─────────────────────────────────────────────
 def _run_training():
-    """Fetch latest market data, label, train a fresh RF model, swap it in."""
+    """Fetch latest market data, label, train a fresh model, swap it in."""
     global model, training_in_progress, last_trained_at, training_error
+    global last_accuracy, last_train_seconds
 
     print(f"\n[{datetime.now():%H:%M:%S}] ── Starting training run ──")
+    _t0 = time.monotonic()
 
     try:
         # ── Fetch & merge multi-timeframe data ──────────────────────────────
@@ -283,6 +306,7 @@ def _run_training():
             model           = new_model
             active_features = feats
             last_trained_at = datetime.now()
+            last_accuracy   = float(accuracy)
             training_error  = None
 
         print(f"[{datetime.now():%H:%M:%S}] ✓ Model swapped in successfully")
@@ -298,37 +322,23 @@ def _run_training():
     finally:
         with _model_lock:
             training_in_progress = False
+            last_train_seconds   = max(1.0, time.monotonic() - _t0)
 
 
 # ─────────────────────────────────────────────
-# Background scheduler — fires every N minutes
+# Retrain trigger — fired by every /predict call
 # ─────────────────────────────────────────────
-def _training_scheduler(interval_minutes: int):
-    """Daemon thread: kick off a training run immediately, then every interval."""
-    global training_in_progress, next_train_at
-
-    while True:
-        # Mark training as in-progress and compute next window
-        with _model_lock:
-            training_in_progress = True
-            next_train_at = datetime.now() + timedelta(minutes=interval_minutes)
-
-        # Run training synchronously inside this scheduler thread so we don't
-        # pile up overlapping train jobs; the scheduler sleeps until done, then
-        # waits for the remaining slot time before firing again.
-        train_start = time.monotonic()
-        _run_training()
-        elapsed = time.monotonic() - train_start
-
-        # Sleep for whatever is left of the interval
-        sleep_secs = max(0, interval_minutes * 60 - elapsed)
-        next_wakeup = datetime.now() + timedelta(seconds=sleep_secs)
-        with _model_lock:
-            next_train_at = next_wakeup
-
-        print(f"  Next retrain scheduled at {next_wakeup:%Y-%m-%d %H:%M:%S} "
-              f"(sleeping {sleep_secs/60:.1f} min)")
-        time.sleep(sleep_secs)
+def maybe_retrain():
+    """Start a fresh training run in the background unless one is already
+    running. Called on every /predict so the model is always current."""
+    global training_in_progress, train_started_at
+    with _model_lock:
+        if training_in_progress:
+            return False
+        training_in_progress = True
+        train_started_at = datetime.now()
+    threading.Thread(target=_run_training, daemon=True, name="Trainer").start()
+    return True
 
 
 # ─────────────────────────────────────────────
@@ -361,6 +371,9 @@ def predict():
     legacy raw-price features from the request query string.
     """
     try:
+        # Retrain-on-predict: kick a fresh training run (background) each call.
+        maybe_retrain()
+
         with _model_lock:
             current_model = model   # grab a local ref while holding lock
             feats         = active_features
@@ -411,27 +424,32 @@ def training_status():
     with _model_lock:
         in_progress  = training_in_progress
         last_at      = last_trained_at
-        next_at      = next_train_at
         model_ready  = model is not None
         last_err     = training_error
+        started_at   = train_started_at
+        train_secs   = last_train_seconds
+        acc          = last_accuracy
 
     now = datetime.now()
 
-    # Time remaining until next retrain (only meaningful when not training)
-    if next_at and not in_progress:
-        remaining_secs = max(0, (next_at - now).total_seconds())
-        remaining_str  = str(timedelta(seconds=int(remaining_secs)))
+    # Estimated time until the current training run completes.
+    if in_progress and started_at is not None:
+        done_at        = started_at + timedelta(seconds=train_secs)
+        remaining_secs = max(0, (done_at - now).total_seconds())
+        done_in_str    = str(timedelta(seconds=int(remaining_secs)))
     else:
         remaining_secs = 0
-        remaining_str  = "N/A — training in progress"
+        done_in_str    = "idle"
 
     return jsonify({
         "training_in_progress" : in_progress,
         "model_ready"          : model_ready,
         "last_trained_at"      : last_at.strftime("%Y-%m-%d %H:%M:%S") if last_at else None,
-        "next_train_at"        : next_at.strftime("%Y-%m-%d %H:%M:%S") if next_at else None,
-        "time_until_retrain"   : remaining_str,
-        "retrain_interval_mins": args.retrain_interval,
+        "time_until_done"      : done_in_str,
+        "time_until_retrain"   : done_in_str,
+        "accuracy"             : round(acc, 4),
+        "accuracy_str"         : f"{acc*100:.1f}%",
+        "last_train_seconds"   : round(train_secs, 1),
         "last_error"           : last_err,
     }), 200
 
@@ -451,12 +469,15 @@ def model_info():
         ready = model is not None
         feats = list(active_features)
         last_at = last_trained_at
+        acc = last_accuracy
     return jsonify({
         "model"        : args.model,
         "features"     : args.features,
         "feature_count": len(feats),
         "model_ready"  : ready,
         "symbol"       : args.symbol,
+        "accuracy"     : round(acc, 4),
+        "accuracy_str" : f"{acc*100:.1f}%",
         "last_trained_at": last_at.strftime("%Y-%m-%d %H:%M:%S") if last_at else None,
     }), 200
 
@@ -471,29 +492,24 @@ def test():
 # ─────────────────────────────────────────────
 if __name__ == '__main__':
     print("=" * 60)
-    print("  ML Prediction Server — starting up")
+    print("  ML Prediction Server (REALTIME / retrain-on-predict) — starting up")
     print(f"  Symbol   : {args.symbol}")
     print(f"  Model    : {args.model}")
-    print(f"  Features : {args.features}")
+    print(f"  Features : {args.features}  (M15 base + M30/H1/H4/D1 + minute)")
     print(f"  Terminal : {args.terminal}")
     print(f"  Port     : {args.port}")
-    print(f"  Retrain  : every {args.retrain_interval} minutes")
+    print(f"  Retrain  : on every /predict request (background)")
     print("=" * 60)
 
     # 1. Connect to MT5 once
     init_mt5()
 
-    # 2. Start the background training scheduler as a daemon thread
-    scheduler = threading.Thread(
-        target=_training_scheduler,
-        args=(args.retrain_interval,),
-        daemon=True,      # dies automatically when the main process exits
-        name="TrainingScheduler"
-    )
-    scheduler.start()
-    print(f"Background training scheduler started (interval: {args.retrain_interval} min)")
+    # 2. Kick off the first training run in the background. Subsequent
+    #    retrains are triggered automatically by each /predict call.
+    maybe_retrain()
+    print("Initial training started — /predict returns Hold (0) until the first model is ready.")
 
-    # 3. Run Flask  (first model will be ready in ~5-6 min; /predict returns 503 until then)
+    # 3. Run Flask
     app.run(host='0.0.0.0', port=args.port, debug=False)
 
 
