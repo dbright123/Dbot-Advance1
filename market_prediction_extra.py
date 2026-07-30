@@ -4,7 +4,11 @@ import time
 from datetime import datetime, timedelta
 
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import (RandomForestClassifier, ExtraTreesClassifier,
+                              GradientBoostingClassifier, HistGradientBoostingClassifier)
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from flask import Flask, request, jsonify
 import numpy as np
@@ -26,6 +30,10 @@ parser.add_argument("--terminal", default = "C:\\Program Files\\HFM MetaTrader 5
 parser.add_argument("--symbol", default = "XAUUSDc", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
 parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
+parser.add_argument("--model", default="et", choices=["et", "rf", "hgb", "gb", "logit"],
+                    help="classifier to train (default et = ExtraTrees, best profit in walk-forward comparison)")
+parser.add_argument("--features", default="engineered", choices=["engineered", "raw"],
+                    help="engineered = stationary returns/ratios computed server-side (recommended); raw = legacy raw-price features from the request")
 args = parser.parse_args()   
 
 # ─────────────────────────────────────────────
@@ -51,6 +59,7 @@ FEATURE_NAMES = [
 # ── Shared training state (all access protected by a lock) ──
 _model_lock          = threading.Lock()
 model                = None          # active model served to /predict
+active_features      = list(FEATURE_NAMES)  # feature columns the active model expects
 training_in_progress = False
 last_trained_at      = None          # datetime of last successful train
 next_train_at        = None          # datetime of next scheduled train
@@ -83,13 +92,18 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
     return df.set_index("time")
 
 
-def build_multi_tf(symbol):
+def build_multi_tf(symbol, bars=None):
     if not mt5.initialize(args.terminal):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
 
-    df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1).reset_index()
-    df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4).reset_index()
-    df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1).reset_index()
+    if bars:
+        n1, n4, n1d = bars, max(80, bars // 4 + 20), max(40, bars // 24 + 20)
+    else:
+        n1 = n4 = n1d = 9_000_000
+
+    df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1, n1).reset_index()
+    df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4, n4).reset_index()
+    df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1, n1d).reset_index()
 
     def tag_and_shift(df, suffix):
         df = df.sort_values("time").rename(
@@ -108,6 +122,103 @@ def build_multi_tf(symbol):
 
 
 # ─────────────────────────────────────────────
+# Engineered (stationary) feature pipeline — mirrors walkforward_sim.py
+# ─────────────────────────────────────────────
+ENG_FEATURES = [
+    "ret1", "ret3", "ret6", "ret12", "ret24", "rng", "body", "upwick", "lowick",
+    "c_sma20", "c_sma50", "sma20_50", "vol20", "atr_pct", "rsi", "vchg",
+    "c_vs_4h", "c_vs_1d", "h4_ret", "d1_ret",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+]
+
+
+def add_calendar(df):
+    t = pd.to_datetime(df["time"], unit="s", errors="coerce")
+    df["month"] = t.dt.month
+    df["day"] = t.dt.day
+    df["hour"] = t.dt.hour
+    df["day_of_week"] = t.dt.dayofweek
+    return df
+
+
+def add_engineered_features(df):
+    """Stationary features that generalise across price levels."""
+    eps = 1e-9
+    o, h, l, c = df["open"], df["high"], df["low"], df["close"]
+    v = df["volume"].astype(float)
+
+    df["ret1"] = c.pct_change()
+    df["ret3"] = c.pct_change(3)
+    df["ret6"] = c.pct_change(6)
+    df["ret12"] = c.pct_change(12)
+    df["ret24"] = c.pct_change(24)
+    df["rng"] = (h - l) / (c + eps)
+    df["body"] = (c - o) / (c + eps)
+    df["upwick"] = (h - np.maximum(o, c)) / (c + eps)
+    df["lowick"] = (np.minimum(o, c) - l) / (c + eps)
+
+    sma20 = c.rolling(20).mean()
+    sma50 = c.rolling(50).mean()
+    df["c_sma20"] = c / (sma20 + eps) - 1
+    df["c_sma50"] = c / (sma50 + eps) - 1
+    df["sma20_50"] = sma20 / (sma50 + eps) - 1
+    df["vol20"] = df["ret1"].rolling(20).std()
+
+    tr = pd.concat([(h - l), (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    df["atr_pct"] = tr.rolling(14).mean() / (c + eps)
+
+    delta = c.diff()
+    up = delta.clip(lower=0).rolling(14).mean()
+    dn = (-delta.clip(upper=0)).rolling(14).mean()
+    df["rsi"] = (100 - 100 / (1 + up / (dn + eps))) / 100.0
+
+    df["vchg"] = v.pct_change().clip(-5, 5)
+    df["c_vs_4h"] = c / (df["close_4h"] + eps) - 1
+    df["c_vs_1d"] = c / (df["close_1d"] + eps) - 1
+    df["h4_ret"] = df["close_4h"].pct_change()
+    df["d1_ret"] = df["close_1d"].pct_change()
+
+    df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
+    df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
+    df["dow_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7)
+    df["dow_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7)
+    return df, list(ENG_FEATURES)
+
+
+def make_model(name):
+    """Classifier factory. Default 'et' (ExtraTrees) — best profit/PF in the
+    walk-forward model comparison."""
+    name = (name or "et").lower()
+    if name == "rf":
+        return RandomForestClassifier(n_estimators=350, class_weight="balanced",
+                                      random_state=42, n_jobs=-1)
+    if name == "hgb":
+        return HistGradientBoostingClassifier(random_state=42, max_iter=300, learning_rate=0.08)
+    if name == "gb":
+        return GradientBoostingClassifier(random_state=42)
+    if name == "logit":
+        return make_pipeline(StandardScaler(),
+                             LogisticRegression(max_iter=1000, class_weight="balanced"))
+    return ExtraTreesClassifier(n_estimators=350, class_weight="balanced",
+                                random_state=42, n_jobs=-1)
+
+
+def build_predict_row(symbol, feats):
+    """Compute the engineered feature vector for the latest bar, server-side."""
+    try:
+        df = build_multi_tf(symbol, bars=400)
+    except Exception as e:
+        print(f"build_predict_row: fetch failed: {e}")
+        return None
+    df = add_calendar(df)
+    df, _ = add_engineered_features(df)
+    df = df[feats].replace([np.inf, -np.inf], np.nan).dropna()
+    if len(df) == 0:
+        return None
+    return df.iloc[-1].values.astype(float)
+
+
+# ─────────────────────────────────────────────
 # Core training routine (runs in bg thread)
 # ─────────────────────────────────────────────
 def _run_training():
@@ -121,8 +232,8 @@ def _run_training():
         df = build_multi_tf(args.symbol)
         print(f"  Multi-TF merge complete: {len(df):,} rows, {len(df.columns)} columns")
 
-        # ── Feature engineering ─────────────────────
-        df = engineer_features(df)   # drop last 200 rows (incomplete bars)
+        # ── Calendar features ───────────────────────
+        df = add_calendar(df)
 
         # ── Labelling ───────────────────────────────
         labeler = RobustPriceLabelerV3(
@@ -134,25 +245,28 @@ def _run_training():
         )
         df = labeler.label(df)
         df = fix_pivot_labels(df)
+
+        # ── Feature set (engineered = stationary returns/ratios) ─────
+        global active_features
+        if args.features == 'engineered':
+            df, feats = add_engineered_features(df)
+        else:
+            feats = list(FEATURE_NAMES)
+        df = df[feats + ['label']].replace([np.inf, -np.inf], np.nan).dropna()
+        print(f"  Features: {len(feats)} ({args.features})  usable rows: {len(df):,}  model: {args.model}")
+
         # ── Train / test split ──────────────────────
-        X = df[FEATURE_NAMES].values
+        X = df[feats].values
         y = df['label'].values
         del df
 
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.1, random_state=42, stratify=y
         )
-        print("Before:", y_train.shape)
-        """        rus = RandomUnderSampler(random_state=42)
-        X_train, y_train = rus.fit_resample(X_train, y_train)
-        print("After: ", y_train.shape)"""
-
         del X, y
 
-        # ── Fit new model ───────────────────────────
-        new_model = RandomForestClassifier(
-            n_estimators=350,random_state=42,class_weight='balanced', verbose=1, n_jobs=-1
-        )
+        # ── Fit new model (default ExtraTrees — best in walk-forward test) ──
+        new_model = make_model(args.model)
         new_model.fit(X_train, y_train)
         del X_train, y_train
 
@@ -167,6 +281,7 @@ def _run_training():
         # ── Swap in the new model atomically ────────
         with _model_lock:
             model           = new_model
+            active_features = feats
             last_trained_at = datetime.now()
             training_error  = None
 
@@ -238,41 +353,46 @@ def init_mt5():
 # ─────────────────────────────────────────────
 @app.route('/predict', methods=['GET'])
 def predict():
-    """Return 0 (Hold), 1 (Buy), or 2 (Sell) for the supplied feature values."""
+    """Return 0 (Hold), 1 (Buy), or 2 (Sell).
+
+    In 'engineered' mode the server ignores the request payload and computes the
+    stationary feature vector for the latest bar itself (from live MT5 data),
+    because those features need a window of history. In 'raw' mode it reads the
+    legacy raw-price features from the request query string.
+    """
     try:
         with _model_lock:
             current_model = model   # grab a local ref while holding lock
+            feats         = active_features
 
         if current_model is None:
             # First train still running — stay neutral
             print("Prediction requested but model not ready yet — returning Hold (0)")
             return "0", 200
 
-        features         = []
-        missing_features = []
-
-        for name in FEATURE_NAMES:
-            raw = request.args.get(name)
-            if raw is None:
-                missing_features.append(name)
-                features.append(0.0)
-                continue
-            try:
-                val = float(raw)
-                # Encode cyclical time features the same way training data was built
-                features.append(val)
-            except ValueError:
-                print(f"Invalid value for feature '{name}' — returning Hold (0)")
+        if args.features == 'engineered':
+            row = build_predict_row(args.symbol, feats)
+            if row is None:
+                print("Predict: could not build engineered feature row — Hold (0)")
                 return "0", 200
+            arr = row.reshape(1, -1)
+        else:
+            features = []
+            for name in feats:
+                raw = request.args.get(name)
+                if raw is None:
+                    features.append(0.0)
+                    continue
+                try:
+                    features.append(float(raw))
+                except ValueError:
+                    print(f"Invalid value for feature '{name}' — returning Hold (0)")
+                    return "0", 200
+            arr = np.array(features).reshape(1, -1)
 
-        if missing_features:
-            print(f"Warning: missing features defaulted to 0 — {missing_features}")
-        print(features)
-        arr        = np.array(features).reshape(1, -1)
         prediction = current_model.predict(arr)[0]
-
         label_map  = {0: "Hold", 1: "Buy", 2: "Sell"}
-        print(f"Prediction: {prediction} ({label_map.get(int(prediction), '?')})")
+        print(f"Prediction: {int(prediction)} ({label_map.get(int(prediction), '?')})  [{args.features}/{args.model}]")
         return str(int(prediction)), 200
 
     except Exception as e:
@@ -335,6 +455,8 @@ if __name__ == '__main__':
     print("=" * 60)
     print("  ML Prediction Server — starting up")
     print(f"  Symbol   : {args.symbol}")
+    print(f"  Model    : {args.model}")
+    print(f"  Features : {args.features}")
     print(f"  Terminal : {args.terminal}")
     print(f"  Port     : {args.port}")
     print(f"  Retrain  : every {args.retrain_interval} minutes")

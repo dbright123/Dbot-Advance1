@@ -42,6 +42,7 @@ fidelity cost. Requires the same environment as the live server
 
 import argparse
 import os
+import shutil
 import time
 from datetime import datetime
 
@@ -50,7 +51,7 @@ import pandas as pd
 
 import MetaTrader5 as mt5
 from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
-                              HistGradientBoostingClassifier)
+                              HistGradientBoostingClassifier, ExtraTreesClassifier)
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -69,13 +70,22 @@ DEFAULT_FILES_DIR = (r"C:\Users\omage\AppData\Roaming\MetaQuotes\Terminal"
 parser = argparse.ArgumentParser(description="Walk-forward simulation server / backtester")
 parser.add_argument("--terminal", default=r"C:\Program Files\HFM MetaTrader 5\terminal64.exe")
 parser.add_argument("--symbol", default="XAUUSDc")
-parser.add_argument("--model", default="hgb", choices=["hgb", "rf", "gb", "logit"],
+parser.add_argument("--model", default="hgb", choices=["hgb", "rf", "et", "gb", "logit"],
                     help="different model to test (default hgb = HistGradientBoosting)")
+parser.add_argument("--all", action="store_true",
+                    help="walk-forward test EVERY model and rank them by simulated profit")
 parser.add_argument("--features", default="engineered", choices=["engineered", "raw"],
                     help="engineered = stationary returns/ratios (recommended); raw = production's raw prices")
 parser.add_argument("--min-train", type=int, default=3000, help="bars required before the first prediction")
 parser.add_argument("--max-test", type=int, default=1000, help="number of most-recent bars to walk-forward test (0 = all)")
 parser.add_argument("--retrain-every", type=int, default=1, help="retrain cadence in bars (1 = every prediction)")
+# ── quick-backtest economics (consistent across models for fair ranking) ──
+parser.add_argument("--be-pips", type=float, default=40.0)
+parser.add_argument("--lock-pips", type=float, default=10.0)
+parser.add_argument("--sl-atr", type=float, default=1.5)
+parser.add_argument("--spread-pips", type=float, default=2.0)
+parser.add_argument("--vol", type=float, default=0.01)
+parser.add_argument("--no-sl", action="store_true", help="disable the hard stop in the quick backtest")
 parser.add_argument("--files-dir", default=DEFAULT_FILES_DIR, help="MT5 Files folder for the signal CSV")
 parser.add_argument("--signal-csv", default="sim_signals.csv")
 parser.add_argument("--report", default="walkforward_report.html")
@@ -198,6 +208,9 @@ def make_model(name):
     if name == "rf":
         return RandomForestClassifier(n_estimators=200, class_weight="balanced",
                                       random_state=42, n_jobs=-1)
+    if name == "et":
+        return ExtraTreesClassifier(n_estimators=250, class_weight="balanced",
+                                    random_state=42, n_jobs=-1)
     if name == "gb":
         return GradientBoostingClassifier(random_state=42)
     if name == "logit":
@@ -397,6 +410,189 @@ def build_report(df, y, preds, start, final_model, feat_names, insample_acc, pat
 
 
 # ──────────────────────────────────────────────────────────────────
+#  Quick consistent backtest (for ranking models by profit)
+# ──────────────────────────────────────────────────────────────────
+def get_symbol_cfg(symbol):
+    si = mt5.symbol_info(symbol)
+    point = si.point if si else 0.01
+    contract = si.trade_contract_size if si else 100.0
+    return dict(point=point, pip=point * 10.0, contract=contract)
+
+
+def quick_backtest(df, preds, start, cfg):
+    """A single-position, flip-on-opposite backtest with trailing-breakeven +
+    ATR stop + spread cost. Identical logic for every model, so the ranking is
+    fair. It is a simplification of the full MQL5 engine (no lot accumulation /
+    re-entry), used only to compare signal quality by profit."""
+    o = df["open"].values; h = df["high"].values
+    l = df["low"].values; c = df["close"].values
+    atr = df["atr_abs"].values
+    n = len(df)
+
+    pip = cfg["pip"]; contract = cfg["contract"]; vol = cfg["vol"]
+    be_thr = cfg["be_pips"] * pip
+    trail = max(pip, (cfg["be_pips"] - cfg["lock_pips"]) * pip)
+    cost = cfg["spread_pips"] * pip * contract * vol
+    use_sl = cfg["use_sl"]; sl_atr = cfg["sl_atr"]
+
+    pos = 0; entry = 0.0; sl = 0.0; be = False
+    realized = 0.0; wins = 0; losses = 0; gp = 0.0; gl = 0.0; trades = 0
+    peak = 0.0; maxdd = 0.0
+
+    def book(px):
+        nonlocal realized, wins, losses, gp, gl, trades
+        pnl = (px - entry) * contract * vol * (1 if pos == 1 else -1) - cost
+        realized += pnl
+        if pnl >= 0: wins += 1; gp += pnl
+        else:        losses += 1; gl += pnl
+        trades += 1
+        return pnl
+
+    for i in range(start, n):
+        a = atr[i]
+        # 1) manage open position over bar i
+        if pos != 0 and a > 0:
+            if pos == 1:
+                if not be and (h[i] - entry) >= be_thr:
+                    be = True; sl = h[i] - trail
+                elif be:
+                    sl = max(sl, h[i] - trail)
+                if sl > 0 and l[i] <= sl:
+                    book(sl); pos = 0; be = False; sl = 0
+            else:
+                if not be and (entry - l[i]) >= be_thr:
+                    be = True; sl = l[i] + trail
+                elif be:
+                    sl = sl and min(sl, l[i] + trail) or (l[i] + trail)
+                if sl > 0 and h[i] >= sl:
+                    book(sl); pos = 0; be = False; sl = 0
+        # 2) apply signal at close[i]
+        sig = preds[i]
+        if sig == 1:
+            if pos == -1: book(c[i]); pos = 0; be = False; sl = 0
+            if pos == 0:
+                pos = 1; entry = c[i]; be = False
+                sl = (entry - sl_atr * a) if (use_sl and a > 0) else 0
+        elif sig == 2:
+            if pos == 1: book(c[i]); pos = 0; be = False; sl = 0
+            if pos == 0:
+                pos = -1; entry = c[i]; be = False
+                sl = (entry + sl_atr * a) if (use_sl and a > 0) else 0
+        elif sig == 0 and pos != 0:
+            fl = (c[i] - entry) * contract * vol * (1 if pos == 1 else -1)
+            if fl > 0:               # hold-basket style: bank a green book
+                book(c[i]); pos = 0; be = False; sl = 0
+        # 3) equity / drawdown
+        fl = (c[i] - entry) * contract * vol * (1 if pos == 1 else -1) if pos != 0 else 0
+        eq = realized + fl
+        peak = max(peak, eq); maxdd = max(maxdd, peak - eq)
+
+    if pos != 0:
+        book(c[n - 1])
+
+    pf = gp / abs(gl) if gl < 0 else (999.0 if gp > 0 else 0.0)
+    win = 100.0 * wins / trades if trades else 0.0
+    return dict(net=realized, pf=pf, win=win, maxdd=maxdd, trades=trades,
+                gp=gp, gl=gl, wins=wins, losses=losses)
+
+
+def _sparkline(vals, w=860, h=120):
+    if len(vals) < 2:
+        return ""
+    pl, pt, pb = 40, 10, 18
+    pw, ph = w - pl - 12, h - pt - pb
+    pts = ""
+    for i, v in enumerate(vals):
+        x = pl + i / (len(vals) - 1) * pw
+        y = pt + (1 - v) * ph
+        pts += f"{x:.1f},{y:.1f} "
+    s = f"<svg width='{w}' height='{h}'><rect width='{w}' height='{h}' fill='#0d1018'/>"
+    yb = pt + (1 - 1 / 3) * ph
+    s += f"<line x1='{pl}' y1='{yb:.1f}' x2='{w-12}' y2='{yb:.1f}' stroke='#5a6' stroke-dasharray='4 3'/>"
+    s += f"<polyline fill='none' stroke='#3d7bff' stroke-width='1.3' points='{pts}'/></svg>"
+    return s
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Multi-model comparison report
+# ──────────────────────────────────────────────────────────────────
+def build_comparison_report(results, best_idx, cfg, feat_names, path):
+    ranked = sorted(range(len(results)), key=lambda k: results[k]["bt"]["net"], reverse=True)
+
+    h = ["<!DOCTYPE html><html><head><meta charset='utf-8'><title>Model Comparison</title><style>"]
+    h.append("body{background:#0b0e16;color:#c9d1e0;font-family:Segoe UI,Arial,sans-serif;margin:0;padding:24px}")
+    h.append("h1{font-size:20px;color:#fff;margin:0 0 4px}h2{font-size:15px;color:#9fb0ff;border-bottom:1px solid #232838;padding-bottom:6px;margin-top:26px}")
+    h.append(".sub{color:#8892a6;font-size:12px;margin-bottom:14px}")
+    h.append("table{border-collapse:collapse;font-size:12px;margin-top:8px}th,td{padding:7px 11px;border-bottom:1px solid #1c2130;text-align:right}th{color:#8892a6;background:#10131f}.l{text-align:left}")
+    h.append(".pos{color:#25c281}.neg{color:#ff5c6c}.neu{color:#e8c85a}.best{background:#122019}")
+    h.append("</style></head><body>")
+    h.append("<h1>Walk-Forward Model Comparison</h1>")
+    h.append(f"<div class='sub'>Symbol <b>{args.symbol}</b> &nbsp;|&nbsp; Features <b>{args.features}</b> "
+             f"&nbsp;|&nbsp; Test bars <b>{results[0]['test_n']}</b> &nbsp;|&nbsp; Retrain every <b>{args.retrain_every}</b> bar(s) "
+             f"&nbsp;|&nbsp; Backtest: BE {args.be_pips:.0f}/lock {args.lock_pips:.0f}, SL {'off' if args.no_sl else str(args.sl_atr)+'xATR'}, "
+             f"spread {args.spread_pips:.1f}p, vol {args.vol} &nbsp;|&nbsp; {datetime.now():%Y-%m-%d %H:%M}</div>")
+
+    h.append("<h2>Ranking (by simulated net profit)</h2>")
+    h.append("<table><tr><th class='l'>#</th><th class='l'>Model</th><th>Net P/L</th><th>Profit Factor</th>"
+             "<th>Win%</th><th>Trades</th><th>Max DD</th><th>WF Acc</th><th>Dir Err%</th><th>Overfit Gap</th></tr>")
+    for rank, k in enumerate(ranked, 1):
+        r = results[k]
+        bt = r["bt"]
+        derr = 100.0 * r["dir_err"] / r["dir_sig"] if r["dir_sig"] else 0.0
+        cls = "best" if k == best_idx else ""
+        h.append(f"<tr class='{cls}'><td class='l'>{rank}</td><td class='l'><b>{r['model']}</b></td>"
+                 f"<td class='{'pos' if bt['net']>=0 else 'neg'}'>{bt['net']:.2f}</td>"
+                 f"<td class='{'pos' if bt['pf']>=1 else 'neg'}'>{bt['pf']:.2f}</td>"
+                 f"<td>{bt['win']:.1f}%</td><td>{bt['trades']}</td>"
+                 f"<td class='neg'>{bt['maxdd']:.2f}</td>"
+                 f"<td class='{'pos' if r['wf']>0.5 else 'neu' if r['wf']>1/3 else 'neg'}'>{r['wf']*100:.1f}%</td>"
+                 f"<td class='neg'>{derr:.1f}%</td>"
+                 f"<td class='{'neg' if r['gap']>0.15 else 'neu' if r['gap']>0.05 else 'pos'}'>{r['gap']*100:.1f}%</td></tr>")
+    h.append("</table>")
+    h.append(f"<div class='sub' style='margin-top:10px'>Best model: <b style='color:#25c281'>{results[best_idx]['model']}</b> "
+             f"— its signals were copied to <b>sim_signals.csv</b>. Each model also has its own "
+             f"<b>sim_signals_&lt;model&gt;.csv</b> in the MT5 Files folder for loading in the MQL5 simulator.</div>")
+
+    # per-model classification snapshot
+    h.append("<h2>Classification Quality (walk-forward)</h2>")
+    h.append("<table><tr><th class='l'>Model</th><th>Buy Prec</th><th>Buy Rec</th><th>Sell Prec</th><th>Sell Rec</th>"
+             "<th>Hold Rec</th><th>Macro F1</th></tr>")
+    for k in ranked:
+        r = results[k]
+        p, rc, f1c = r["prec"], r["rec"], r["f1c"]
+        macro = (f1c[0] + f1c[1] + f1c[2]) / 3.0
+        h.append(f"<tr><td class='l'><b>{r['model']}</b></td>"
+                 f"<td>{p[1]*100:.1f}%</td><td>{rc[1]*100:.1f}%</td>"
+                 f"<td>{p[2]*100:.1f}%</td><td>{rc[2]*100:.1f}%</td>"
+                 f"<td>{rc[0]*100:.1f}%</td><td>{macro:.3f}</td></tr>")
+    h.append("</table>")
+
+    # best model rolling accuracy + confusion matrix
+    rb = results[best_idx]
+    h.append(f"<h2>Best model ({rb['model']}) — walk-forward accuracy over time</h2>")
+    h.append(_sparkline(rb["roll"]))
+    cm = rb["cm"]
+    h.append(f"<h2>Best model ({rb['model']}) — confusion matrix</h2>")
+    h.append("<table><tr><th></th><th>pred Hold</th><th>pred Buy</th><th>pred Sell</th><th>recall</th></tr>")
+    rl = ["true Hold", "true Buy", "true Sell"]
+    for r in range(3):
+        rs = cm[r].sum()
+        h.append(f"<tr><th class='l'>{rl[r]}</th>")
+        for cc in range(3):
+            h.append(f"<td class='{'pos' if r==cc else 'neg'}'>{cm[r][cc]}</td>")
+        h.append(f"<td>{(cm[r][r]/rs*100 if rs else 0):.1f}%</td></tr>")
+    h.append("</table>")
+
+    h.append("<p class='sub' style='margin-top:22px'>Net P/L here comes from a consistent simplified backtest (single position, flip on opposite, "
+             "trailing-breakeven, ATR stop, spread cost) so models are ranked fairly by signal quality. For the exact strategy result, load the chosen "
+             "model's CSV into the MQL5 simulator (SignalSource = SIG_FILE). A model can rank high on accuracy yet low on profit if it is right on small "
+             "moves and wrong on big ones — always trust the profit ranking over raw accuracy.</p>")
+    h.append("</body></html>")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(h))
+
+
+# ──────────────────────────────────────────────────────────────────
 #  Main
 # ──────────────────────────────────────────────────────────────────
 def main():
@@ -404,64 +600,101 @@ def main():
     df = build_multi_tf(args.symbol)
     print(f"  merged rows: {len(df):,}")
 
-    # calendar features (keep 'time' for alignment/export)
     df = add_calendar(df)
 
-    # label with the SAME production labeler (target parity)
     labeler = RobustPriceLabelerV3(atr_period=14, zigzag_atr_mult=0.5,
                                    hold_bars=1, min_streak=0.01, target_hold_pct=0.01)
     df = labeler.label(df)
     df = fix_pivot_labels(df)
 
-    # feature set
+    # absolute ATR for the backtest stop
+    hh, ll, cc = df["high"], df["low"], df["close"]
+    tr = pd.concat([(hh - ll), (hh - cc.shift()).abs(), (ll - cc.shift()).abs()], axis=1).max(axis=1)
+    df["atr_abs"] = tr.rolling(14).mean()
+
     if args.features == "engineered":
         df, feat_names = add_engineered_features(df)
     else:
         feat_names = RAW_FEATURES
 
-    keep = ["time", "label"] + [f for f in feat_names if f in df.columns]
+    keep = ["time", "label", "open", "high", "low", "close", "atr_abs"] + \
+           [f for f in feat_names if f in df.columns]
     df = df[keep].replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
-    print(f"  usable rows after features/labels: {len(df):,}  features: {len(feat_names)}")
+    print(f"  usable rows: {len(df):,}  features: {len(feat_names)}")
 
     X = df[feat_names].values.astype(float)
     y = df["label"].values.astype(int)
-
     if len(df) <= args.min_train + 50:
-        raise SystemExit(f"Not enough data ({len(df)}) for min-train {args.min_train}. Load more history in MT5.")
+        raise SystemExit(f"Not enough data ({len(df)}) for min-train {args.min_train}.")
 
-    print(f"Walk-forward: min_train={args.min_train} max_test={args.max_test} retrain_every={args.retrain_every} model={args.model}")
-    preds, start, final_model = walk_forward(
-        X, y, args.min_train, args.max_test, args.retrain_every, args.model)
+    cfg = get_symbol_cfg(args.symbol)
+    cfg.update(dict(be_pips=args.be_pips, lock_pips=args.lock_pips, sl_atr=args.sl_atr,
+                    spread_pips=args.spread_pips, vol=args.vol, use_sl=not args.no_sl))
 
-    # in-sample accuracy (train on all, predict all) — the "cheating" number
-    insample_model = make_model(args.model)
-    insample_model.fit(X, y)
-    insample_acc = accuracy_score(y, insample_model.predict(X))
+    models = ["logit", "rf", "et", "hgb", "gb"] if args.all else [args.model]
+    if args.all and args.retrain_every == 1:
+        print("  NOTE: --all with retrain-every=1 is slow. Consider --retrain-every 10 for a quick first pass.")
 
-    # ── export look-ahead-free signals for the MQL5 simulator ──
     os.makedirs(args.files_dir, exist_ok=True)
-    csv_path = os.path.join(args.files_dir, args.signal_csv)
-    rows = 0
-    with open(csv_path, "w") as f:
-        for i in range(start, len(df)):
-            if preds[i] < 0:
-                continue
-            f.write(f"{int(df['time'].iat[i])},{int(preds[i])}\n")
-            rows += 1
-    print(f"  wrote {rows} signals → {csv_path}")
+    results = []
 
-    report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), args.report)
-    build_report(df, y, preds, start, final_model, feat_names, insample_acc, report_path)
-    print(f"  wrote report → {report_path}")
+    for m in models:
+        print(f"\n=== Walk-forward model: {m} ===")
+        preds, start, final_model = walk_forward(
+            X, y, args.min_train, args.max_test, args.retrain_every, m)
 
-    mask = preds >= 0
-    print("\n================ SUMMARY ================")
-    print(f" Walk-forward accuracy : {accuracy_score(y[mask], preds[mask])*100:.1f}%")
-    print(f" In-sample accuracy    : {insample_acc*100:.1f}%")
-    print(f" Overfit/look-ahead gap: {(insample_acc-accuracy_score(y[mask], preds[mask]))*100:.1f}%")
-    print(f" Test bars             : {int(mask.sum())}")
-    print("=========================================")
+        ins = make_model(m); ins.fit(X, y)
+        insample = accuracy_score(y, ins.predict(X))
+
+        mask = preds >= 0
+        yt, yp = y[mask], preds[mask]
+        wf = accuracy_score(yt, yp) if len(yt) else 0.0
+        cm = confusion_matrix(yt, yp, labels=[0, 1, 2])
+        prec, rec, f1c, sup = precision_recall_fscore_support(
+            yt, yp, labels=[0, 1, 2], zero_division=0)
+        dir_err = int(np.sum((yp == 1) & (yt == 2)) + np.sum((yp == 2) & (yt == 1)))
+        dir_sig = int(np.sum((yp == 1) | (yp == 2)))
+        blk = 50
+        roll = [accuracy_score(yt[k:k + blk], yp[k:k + blk])
+                for k in range(0, len(yt), blk) if len(yt[k:k + blk])]
+
+        bt = quick_backtest(df, preds, start, cfg)
+
+        # export this model's signals
+        csv_m = os.path.join(args.files_dir, f"sim_signals_{m}.csv")
+        with open(csv_m, "w") as f:
+            for i in range(start, len(df)):
+                if preds[i] >= 0:
+                    f.write(f"{int(df['time'].iat[i])},{int(preds[i])}\n")
+
+        print(f"  {m}: net {bt['net']:.2f}  PF {bt['pf']:.2f}  win {bt['win']:.1f}%  "
+              f"trades {bt['trades']}  WFacc {wf*100:.1f}%  gap {(insample-wf)*100:.1f}%")
+
+        results.append(dict(model=m, wf=wf, insample=insample, gap=insample - wf,
+                            cm=cm, prec=prec, rec=rec, f1c=f1c, sup=sup,
+                            dir_err=dir_err, dir_sig=dir_sig, roll=roll, bt=bt,
+                            test_n=int(mask.sum())))
+
+    best_idx = max(range(len(results)), key=lambda k: results[k]["bt"]["net"])
+    best_model = results[best_idx]["model"]
+    shutil.copyfile(os.path.join(args.files_dir, f"sim_signals_{best_model}.csv"),
+                    os.path.join(args.files_dir, args.signal_csv))
+
+    report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "model_comparison_report.html" if args.all else args.report)
+    build_comparison_report(results, best_idx, cfg, feat_names, report_path)
+
+    print("\n================ RANKING (by net profit) ================")
+    for rank, k in enumerate(sorted(range(len(results)),
+                                    key=lambda k: results[k]["bt"]["net"], reverse=True), 1):
+        r = results[k]; b = r["bt"]
+        star = "  <-- best" if k == best_idx else ""
+        print(f" {rank}. {r['model']:5s}  net {b['net']:9.2f}  PF {b['pf']:5.2f}  "
+              f"win {b['win']:5.1f}%  WFacc {r['wf']*100:4.1f}%  gap {r['gap']*100:4.1f}%{star}")
+    print("=========================================================")
+    print(f" Best signals → sim_signals.csv  |  report → {report_path}")
     mt5.shutdown()
+
 
 
 if __name__ == "__main__":
