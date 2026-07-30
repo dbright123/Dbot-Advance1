@@ -133,7 +133,7 @@ def _run_training():
             target_hold_pct = 0.01 ,
         )
         df = labeler.label(df)
-        
+        df = fix_pivot_labels(df)
         # ── Train / test split ──────────────────────
         X = df[FEATURE_NAMES].values
         y = df['label'].values
