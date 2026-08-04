@@ -199,7 +199,7 @@ def label_window(df_slice):
         min_streak=0.01, target_hold_pct=0.01,
     )
     d = labeler.label(df_slice.copy())
-    d = fix_pivot_labels(d)
+    #d = fix_pivot_labels(d)
     return np.asarray(d["label"].values)
 
 
