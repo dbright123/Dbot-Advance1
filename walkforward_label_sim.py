@@ -55,9 +55,9 @@ from extra_function import RobustPriceLabelerV3, fix_pivot_labels
 # CLI
 # ─────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Walk-forward label simulator (predict-then-retrain)")
-parser.add_argument("--terminal", default="C:\\Program Files\\HFM MetaTrader 5\\terminal64.exe",
+parser.add_argument("--terminal", default="C:\\Program Files\\MetaTrader 5\\terminal64.exe",
                     help="Full path to terminal64.exe")
-parser.add_argument("--symbol", default="XAUUSDc", help="Trading symbol")
+parser.add_argument("--symbol", default="XAUUSD", help="Trading symbol")
 parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier (default et = ExtraTrees, same as server)")
 parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
@@ -79,6 +79,7 @@ args = parser.parse_args()
 # ─────────────────────────────────────────────────────────────────────
 FEATURE_NAMES = [
     'open', 'high', 'low', 'close', 'volume',
+    'open_1h', 'high_1h', 'low_1h', 'close_1h', 'volume_1h',
     'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
     'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
     'hour','minute', 'day', 'month', 'day_of_week',
@@ -120,8 +121,10 @@ def build_multi_tf(symbol):
         df[val_cols] = df[val_cols].shift(1)      # only use CLOSED higher-TF bars
         return df
 
+    df_1h = tag_and_shift(df_1h, "1h")
     df_4h = tag_and_shift(df_4h, "4h")
     df_1d = tag_and_shift(df_1d, "1d")
+    
     #df_1h = df_1h.sort_values("time")
     df_15m = df_15m.sort_values("time")
     merged = pd.merge_asof(df_15m, df_1h, on="time", direction="backward")
@@ -136,8 +139,9 @@ def add_calendar(df):
     df["month"] = t.dt.month
     df["day"] = t.dt.day
     df["hour"] = t.dt.hour
-    df["minute"] = t.df.minute
+    df["minute"] = t.dt.minute
     df["day_of_week"] = t.dt.dayofweek
+    print(df)
     return df
 
 
