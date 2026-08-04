@@ -51,6 +51,9 @@ from sklearn.preprocessing import StandardScaler
 # Reuse the server's exact labeller so labels match production 1:1
 from extra_function import RobustPriceLabelerV3, fix_pivot_labels
 
+from sklearnex import patch_sklearn, config_context
+patch_sklearn()
+
 
 # ─────────────────────────────────────────────────────────────────────
 # CLI
