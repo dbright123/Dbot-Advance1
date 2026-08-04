@@ -51,10 +51,6 @@ from sklearn.preprocessing import StandardScaler
 # Reuse the server's exact labeller so labels match production 1:1
 from extra_function import RobustPriceLabelerV3, fix_pivot_labels
 
-from sklearnex import patch_sklearn, config_context
-patch_sklearn()
-
-
 # ─────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────
@@ -85,7 +81,7 @@ FEATURE_NAMES = [
     'open', 'high', 'low', 'close', 'volume',
     'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
     'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
-    'hour', 'day', 'month', 'day_of_week',
+    'hour','minute', 'day', 'month', 'day_of_week',
 ]
 
 ENG_FEATURES = [
@@ -112,7 +108,7 @@ def fetch_rates(symbol, timeframe, count):
 def build_multi_tf(symbol):
     if not mt5.initialize(args.terminal):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
-
+    df_15m = fetch_rates(symbol, mt5.TIMEFRAME_M15, 9_000_000).reset_index()
     df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1, 9_000_000).reset_index()
     df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4, 9_000_000).reset_index()
     df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1, 9_000_000).reset_index()
@@ -126,9 +122,11 @@ def build_multi_tf(symbol):
 
     df_4h = tag_and_shift(df_4h, "4h")
     df_1d = tag_and_shift(df_1d, "1d")
-    df_1h = df_1h.sort_values("time")
-
-    merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
+    #df_1h = df_1h.sort_values("time")
+    df_15m = df_15m.sort_values("time")
+    merged = pd.merge_asof(df_15m, df_1h, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_4h, on="time", direction="backward")
+    #merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
     return merged.reset_index(drop=True)
 
@@ -138,6 +136,7 @@ def add_calendar(df):
     df["month"] = t.dt.month
     df["day"] = t.dt.day
     df["hour"] = t.dt.hour
+    df["minute"] = t.df.minute
     df["day_of_week"] = t.dt.dayofweek
     return df
 
@@ -295,7 +294,7 @@ def main():
             eta = (args.bars - step - 1) / rate if rate > 0 else 0
             print(f"  bar {step + 1}/{args.bars}  retrains={n_retrains}  "
                   f"{rate:.1f} bar/s  ETA {eta/60:.1f} min")
-
+            
     out = pd.DataFrame(rows)
     out_path = args.out or default_out_path()
     out.to_csv(out_path, index=False)
@@ -311,6 +310,7 @@ def main():
     print(f"Predictions  BUY={n_buy}  SELL={n_sell}  HOLD={n_hold}")
     print(f"Agreement with hindsight labels: {agree:.1f}%")
     print(f"Total time: {(time.time() - t0)/60:.1f} min  ({n_retrains} retrains)")
+    
     mt5.shutdown()
 
 
