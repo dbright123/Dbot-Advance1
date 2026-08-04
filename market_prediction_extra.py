@@ -30,7 +30,7 @@ parser.add_argument("--terminal", default = "C:\\Program Files\\HFM MetaTrader 5
 parser.add_argument("--symbol", default = "XAUUSDc", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
 parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
-parser.add_argument("--model", default="et", choices=["et", "rf", "hgb", "gb", "logit"],
+parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier to train (default et = ExtraTrees, best profit in walk-forward comparison)")
 parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
                     help="engineered = stationary returns/ratios computed server-side (recommended); raw = legacy raw-price features from the request")
