@@ -63,7 +63,7 @@ parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "
                     help="classifier (default et = ExtraTrees, same as server)")
 parser.add_argument("--features", default="engineered", choices=["engineered", "raw"],
                     help="feature set (default raw, same as server default)")
-parser.add_argument("--bars", type=int, default=1000, help="how many recent bars to walk forward")
+parser.add_argument("--bars", type=int, default=2000, help="how many recent bars to walk forward")
 parser.add_argument("--retrain-every", type=int, default=1,
                     help="retrain cadence in bars (1 = every bar like the live server; raise to speed up)")
 parser.add_argument("--train-window", type=int, default=0,
