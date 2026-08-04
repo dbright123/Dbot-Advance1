@@ -61,14 +61,14 @@ parser.add_argument("--terminal", default="C:\\Program Files\\HFM MetaTrader 5\\
 parser.add_argument("--symbol", default="XAUUSDc", help="Trading symbol")
 parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier (default et = ExtraTrees, same as server)")
-parser.add_argument("--features", default="engineered", choices=["engineered", "raw"],
+parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
                     help="feature set (default raw, same as server default)")
-parser.add_argument("--bars", type=int, default=2000, help="how many recent bars to walk forward")
+parser.add_argument("--bars", type=int, default=1000, help="how many recent bars to walk forward")
 parser.add_argument("--retrain-every", type=int, default=1,
                     help="retrain cadence in bars (1 = every bar like the live server; raise to speed up)")
 parser.add_argument("--train-window", type=int, default=0,
                     help="cap training rows to the last W bars (0 = use all history before t)")
-parser.add_argument("--n-estimators", type=int, default=400,
+parser.add_argument("--n-estimators", type=int, default=350,
                     help="trees for et/rf (lower = faster, default 400 like server)")
 parser.add_argument("--out", default="",
                     help="output CSV path (default: MT5 Common\\Files\\market_predictor_signals.csv)")
