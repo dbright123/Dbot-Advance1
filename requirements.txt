@@ -10,4 +10,4 @@ pandas
 Requests
 scikit_learn
 seaborn
-
+scikit-learn-intelex-gpu
