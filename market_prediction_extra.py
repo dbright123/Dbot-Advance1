@@ -215,7 +215,7 @@ def make_model(name):
     name = (name or "et").lower()
     if name == "rf":
         return RandomForestClassifier(n_estimators=350, class_weight="balanced",
-                                      random_state=42, n_jobs=-1)
+                                      random_state=42, n_jobs=-1, verbose= 1)
     if name == "hgb":
         return HistGradientBoostingClassifier(random_state=42, max_iter=300, learning_rate=0.08)
     if name == "gb":
@@ -224,7 +224,7 @@ def make_model(name):
         return make_pipeline(StandardScaler(),
                              LogisticRegression(max_iter=1000, class_weight="balanced"))
     return ExtraTreesClassifier(n_estimators=400, class_weight="balanced",
-                                random_state=42, n_jobs=-1)
+                                random_state=42, n_jobs=-1, verbose= 1)
 
 
 def build_predict_row(symbol, feats):
