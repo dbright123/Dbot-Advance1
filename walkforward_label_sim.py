@@ -201,8 +201,11 @@ def make_model(name):
 def label_window(df_slice):
     """Server-identical labelling, applied only to the given (causal) window."""
     labeler = RobustPriceLabelerV3(
-        atr_period=14, zigzag_atr_mult=0.5, hold_bars=1,
-        min_streak=0.01, target_hold_pct=0.01,
+        atr_period      = 14,
+        zigzag_atr_mult = 5,
+        hold_bars       = 5,
+        min_streak      = 1.5,
+        target_hold_pct = 1.5,
     )
     d = labeler.label(df_slice.copy())
     #d = fix_pivot_labels(d)
