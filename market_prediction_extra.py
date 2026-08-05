@@ -26,8 +26,8 @@ from extra_function import fix_pivot_labels
 # ─────────────────────────────────────────────
 
 parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrader 5")
-parser.add_argument("--terminal", default = "C:\\Program Files\\HFM MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
-parser.add_argument("--symbol", default = "XAUUSDc", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
+parser.add_argument("--terminal", default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
+parser.add_argument("--symbol", default = "XAUUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
 parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
 parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
@@ -46,14 +46,11 @@ print("MetaTrader5 package author: ", mt5.__author__)
 print("MetaTrader5 package version: ", mt5.__version__)
 
 FEATURE_NAMES = [
-    # ── H1 (base timeframe) ──────────────────────────────────────
     'open', 'high', 'low', 'close', 'volume',
-    # ── H4 timeframe ─────────────────────────────────────────────
-    'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
-    # ── D1 timeframe ─────────────────────────────────────────────
-    'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
-    # ── Calendar features ─────────────────────────────────────────
-    'hour', 'day', 'month', 'day_of_week',
+        'open_1h', 'high_1h', 'low_1h', 'close_1h', 'volume_1h',
+        'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
+        'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
+        'hour','minute', 'day', 'month', 'day_of_week',
 ]
 
 # ── Shared training state (all access protected by a lock) ──
@@ -91,7 +88,33 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
     #df["time"] = pd.to_datetime(df["time"], unit="s")
     return df.set_index("time")
 
+def build_multi_tf(symbol):
+    if not mt5.initialize(args.terminal):
+        raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
+    df_15m = fetch_rates(symbol, mt5.TIMEFRAME_M15, 9_000_000).reset_index()
+    df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1, 9_000_000).reset_index()
+    df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4, 9_000_000).reset_index()
+    df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1, 9_000_000).reset_index()
 
+    def tag_and_shift(df, suffix):
+        df = df.sort_values("time").rename(
+            columns={c: f"{c}_{suffix}" for c in df.columns if c != "time"})
+        val_cols = [c for c in df.columns if c != "time"]
+        df[val_cols] = df[val_cols].shift(1)      # only use CLOSED higher-TF bars
+        return df
+
+    df_1h = tag_and_shift(df_1h, "1h")
+    df_4h = tag_and_shift(df_4h, "4h")
+    df_1d = tag_and_shift(df_1d, "1d")
+    
+    #df_1h = df_1h.sort_values("time")
+    df_15m = df_15m.sort_values("time")
+    merged = pd.merge_asof(df_15m, df_1h, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_4h, on="time", direction="backward")
+    #merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
+    return merged.reset_index(drop=True)
+"""
 def build_multi_tf(symbol, bars=None):
     if not mt5.initialize(args.terminal):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
@@ -119,7 +142,7 @@ def build_multi_tf(symbol, bars=None):
     merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
     return merged
-
+"""
 
 # ─────────────────────────────────────────────
 # Engineered (stationary) feature pipeline — mirrors walkforward_sim.py
@@ -137,6 +160,7 @@ def add_calendar(df):
     df["month"] = t.dt.month
     df["day"] = t.dt.day
     df["hour"] = t.dt.hour
+    df["minute"] = t.dt.minute
     df["day_of_week"] = t.dt.dayofweek
     return df
 
@@ -190,7 +214,7 @@ def make_model(name):
     walk-forward model comparison."""
     name = (name or "et").lower()
     if name == "rf":
-        return RandomForestClassifier(n_estimators=400, class_weight="balanced",
+        return RandomForestClassifier(n_estimators=350, class_weight="balanced",
                                       random_state=42, n_jobs=-1)
     if name == "hgb":
         return HistGradientBoostingClassifier(random_state=42, max_iter=300, learning_rate=0.08)
@@ -244,7 +268,7 @@ def _run_training():
             target_hold_pct = 0.01 ,
         )
         df = labeler.label(df)
-        df = fix_pivot_labels(df)
+        #df = fix_pivot_labels(df)
 
         # ── Feature set (engineered = stationary returns/ratios) ─────
         global active_features
