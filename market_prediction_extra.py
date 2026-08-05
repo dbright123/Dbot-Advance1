@@ -262,10 +262,10 @@ def _run_training():
         # ── Labelling ───────────────────────────────
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
-            zigzag_atr_mult = 0.5,
-            hold_bars       = 1,
-            min_streak      = 0.01,
-            target_hold_pct = 0.01 ,
+            zigzag_atr_mult = 5,
+            hold_bars       = 5,
+            min_streak      = 1.5,
+            target_hold_pct = 1.5,
         )
         df = labeler.label(df)
         #df = fix_pivot_labels(df)
