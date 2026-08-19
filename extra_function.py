@@ -3382,3 +3382,142 @@ def fix_pivot_labels(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+
+
+def label_optimal_positions(
+    df,
+    price_col='close',
+    transaction_cost=0.0001,   # cost per one-way trade as fraction of price
+    holding_penalty=0.0,       # optional per-bar penalty for being long/short
+    allow_short=True,
+    verbose=False
+):
+    """
+    Viterbi forward-backward labeling.
+
+    States:
+        0 = flat / hold
+        1 = long / buy
+        2 = short / sell (if allow_short=True)
+
+    The objective is to maximize:
+        cumulative log return - transaction costs - holding penalties.
+    """
+    df = df.copy()
+
+    # Optional: sort by datetime if available
+    if 'datetime' in df.columns:
+        df = df.sort_values('datetime').reset_index(drop=True)
+
+    # Use only close price
+    close = df[price_col].to_numpy(dtype=float)
+    T = len(close)
+
+    # 1-bar forward log return; last bar has no future return
+    log_ret = np.empty(T, dtype=float)
+    log_ret[:-1] = np.log(close[1:] / close[:-1])
+    log_ret[-1] = 0.0
+
+    n_states = 3 if allow_short else 2
+
+    # Emission scores for each state at each bar
+    emissions = np.zeros((T, n_states), dtype=float)
+    emissions[:, 0] = 0.0                              # flat
+    emissions[:, 1] = log_ret - holding_penalty        # long
+    if n_states == 3:
+        emissions[:, 2] = -log_ret - holding_penalty   # short
+
+    # Transition cost matrix: cost to switch from state i to state j
+    tc = transaction_cost
+    if n_states == 3:
+        # 0->1 or 0->2 : one trade
+        # 1->0 or 2->0 : one trade
+        # 1->2 or 2->1 : two trades (close + open)
+        trans_cost = np.array([
+            [0.0, tc, tc],
+            [tc, 0.0, 2 * tc],
+            [tc, 2 * tc, 0.0]
+        ], dtype=float)
+    else:
+        trans_cost = np.array([
+            [0.0, tc],
+            [tc, 0.0]
+        ], dtype=float)
+
+    # Viterbi forward recursion
+    dp = np.full((T, n_states), -np.inf, dtype=float)
+    backptr = np.zeros((T, n_states), dtype=np.int8)
+
+    dp[0] = emissions[0]
+
+    for t in range(1, T):
+        prev = dp[t - 1]
+        emit_t = emissions[t]
+
+        # scores[i, j] = best score ending previous state i and moving to current state j
+        scores = prev[:, None] - trans_cost + emit_t[None, :]
+
+        dp[t] = scores.max(axis=0)
+        backptr[t] = scores.argmax(axis=0)
+
+    # Backward traceback: correct earlier decisions
+    labels = np.zeros(T, dtype=np.int8)
+    labels[-1] = int(np.argmax(dp[-1]))
+
+    for t in range(T - 2, -1, -1):
+        labels[t] = backptr[t + 1, labels[t + 1]]
+
+    df['label'] = labels
+
+    if verbose:
+        print("Label counts:")
+        print(pd.Series(labels).value_counts().sort_index())
+        print(f"State changes / trades: {(np.diff(labels) != 0).sum()}")
+
+    return df
+
+
+def evaluate_labels(
+    df,
+    label_col='label',
+    price_col='close',
+    transaction_cost=0.0001,
+    holding_penalty=0.0
+):
+    """
+    Evaluate the net log return of the labeled positions.
+    Returns:
+        gross_log_return, total_switch_cost, net_log_return
+    """
+    close = df[price_col].to_numpy(dtype=float)
+    labels = df[label_col].to_numpy(dtype=int)
+
+    log_ret = np.empty(len(close), dtype=float)
+    log_ret[:-1] = np.log(close[1:] / close[:-1])
+    log_ret[-1] = 0.0
+
+    # Position returns
+    pos_ret = np.where(
+        labels == 1,
+        log_ret,
+        np.where(labels == 2, -log_ret, 0.0)
+    )
+
+    gross = pos_ret.sum() - holding_penalty * np.sum(labels != 0)
+
+    # Transaction costs from state switches
+    changed = np.diff(labels) != 0
+    old_labels = labels[:-1][changed]
+    new_labels = labels[1:][changed]
+
+    switch_costs = np.where(
+        ((old_labels == 1) & (new_labels == 2)) |
+        ((old_labels == 2) & (new_labels == 1)),
+        2 * transaction_cost,
+        transaction_cost
+    )
+
+    total_switch_cost = switch_costs.sum()
+    net = gross - total_switch_cost
+
+    return gross, total_switch_cost, net
