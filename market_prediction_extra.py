@@ -16,7 +16,7 @@ import pandas as pd
 from flask_cors import CORS
 import MetaTrader5 as mt5
 from extra_function import RobustPriceLabelerV3, engineer_features, plot_signals, predict_and_plot_signals
-from extra_function import RobustPriceLabelerV4, RobustPriceLabelerV5
+from extra_function import RobustPriceLabelerV4, RobustPriceLabelerV5, label_optimal_positions, evaluate_labels
 from imblearn.under_sampling import RandomUnderSampler
 
 from extra_function import fix_pivot_labels
@@ -259,6 +259,30 @@ def _run_training():
         # ── Calendar features ───────────────────────
         df = add_calendar(df)
 
+        
+        # Label the data
+        df = label_optimal_positions(
+            df,
+            price_col='close',
+            transaction_cost=0.00019,   # tune this to your spread + commission
+            holding_penalty=0.00019,
+            allow_short=True,
+            verbose=True
+        )
+
+        # Evaluate the labels
+        gross, switch_cost, net = evaluate_labels(
+            df,
+            transaction_cost=0.00019
+        )
+
+        print(f"Gross log return: {gross:.6f}")
+        print(f"Total switch cost: {switch_cost:.6f}")
+        print(f"Net log return: {net:.6f}")
+
+
+
+        """
         # ── Labelling ───────────────────────────────
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
@@ -269,7 +293,7 @@ def _run_training():
         )
         df = labeler.label(df)
         #df = fix_pivot_labels(df)
-
+        """
         # ── Feature set (engineered = stationary returns/ratios) ─────
         global active_features
         if args.features == 'engineered':
