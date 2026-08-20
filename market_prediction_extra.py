@@ -224,7 +224,7 @@ def make_model(name):
         return make_pipeline(StandardScaler(),
                              LogisticRegression(max_iter=1000, class_weight="balanced"))
     return ExtraTreesClassifier(n_estimators=400, class_weight="balanced",
-                                random_state=42, n_jobs=3, verbose= 1)
+                                random_state=45, n_jobs=3, verbose= 1)
 
 
 def build_predict_row(symbol, feats):
@@ -259,7 +259,7 @@ def _run_training():
         # ── Calendar features ───────────────────────
         df = add_calendar(df)
 
-        
+        """
         # Label the data
         df = label_optimal_positions(
             df,
@@ -293,7 +293,7 @@ def _run_training():
         )
         df = labeler.label(df)
         #df = fix_pivot_labels(df)
-        """
+        
         # ── Feature set (engineered = stationary returns/ratios) ─────
         global active_features
         if args.features == 'engineered':
@@ -309,7 +309,7 @@ def _run_training():
         del df
 
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.1, random_state=42, stratify=y
+            X, y, test_size=0.1, random_state=45, stratify=y
         )
         del X, y
 
