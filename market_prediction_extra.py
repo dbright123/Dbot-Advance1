@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrade
 parser.add_argument("--terminal", default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
 parser.add_argument("--symbol", default = "XAUUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
-parser.add_argument("--retrain-interval", type=int, default=(30), help="Minutes between automatic retrains  (default: 1 day)")
+parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
 parser.add_argument("--model", default="et", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier to train (default et = ExtraTrees, best profit in walk-forward comparison)")
 parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
