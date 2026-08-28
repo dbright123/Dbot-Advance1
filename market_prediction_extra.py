@@ -232,7 +232,7 @@ def make_model(name):
     walk-forward model comparison."""
     name = (name or "et").lower()
     if name == "rf":
-        return RandomForestClassifier(n_estimators=350, class_weight="balanced",
+        return RandomForestClassifier(n_estimators=400, class_weight="balanced",
                                       random_state=42, n_jobs=3, verbose= 1)
     if name == "hgb":
         return HistGradientBoostingClassifier(random_state=42, max_iter=300, learning_rate=0.08)
