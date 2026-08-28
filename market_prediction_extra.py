@@ -29,8 +29,8 @@ parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrade
 parser.add_argument("--terminal", default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
 parser.add_argument("--symbol", default = "XAUUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
-parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
-parser.add_argument("--model", default="et", choices=["et", "rf", "hgb", "gb", "logit"],
+parser.add_argument("--retrain-interval", type=int, default=(60 * 24), help="Minutes between automatic retrains  (default: 1 day)")
+parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier to train (default et = ExtraTrees, best profit in walk-forward comparison)")
 parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
                     help="engineered = stationary returns/ratios computed server-side (recommended); raw = legacy raw-price features from the request")
@@ -47,10 +47,13 @@ print("MetaTrader5 package version: ", mt5.__version__)
 
 FEATURE_NAMES = [
     'open', 'high', 'low', 'close', 'volume',
-        'open_1h', 'high_1h', 'low_1h', 'close_1h', 'volume_1h',
-        'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
-        'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
-        'hour','minute', 'day', 'month', 'day_of_week',
+    'open_5m', 'high_5m', 'low_5m', 'close_5m', 'volume_5m',
+    'open_15m', 'high_15m', 'low_15m', 'close_15m', 'volume_15m',
+    'open_30m', 'high_30m', 'low_30m', 'close_30m', 'volume_30m',
+    'open_1h', 'high_1h', 'low_1h', 'close_1h', 'volume_1h',
+    'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
+    'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
+    'hour','minute', 'day', 'month', 'day_of_week'
 ]
 
 # ── Shared training state (all access protected by a lock) ──
@@ -91,7 +94,10 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
 def build_multi_tf(symbol):
     if not mt5.initialize(args.terminal):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
+    df_1m = fetch_rates(symbol, mt5.TIMEFRAME_M1, 9_000_000).reset_index()
+    df_5m = fetch_rates(symbol, mt5.TIMEFRAME_M5, 9_000_000).reset_index()
     df_15m = fetch_rates(symbol, mt5.TIMEFRAME_M15, 9_000_000).reset_index()
+    df_30m = fetch_rates(symbol, mt5.TIMEFRAME_M30, 9_000_000).reset_index()
     df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1, 9_000_000).reset_index()
     df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4, 9_000_000).reset_index()
     df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1, 9_000_000).reset_index()
@@ -103,17 +109,29 @@ def build_multi_tf(symbol):
         df[val_cols] = df[val_cols].shift(1)      # only use CLOSED higher-TF bars
         return df
 
+    
+    df_5m = tag_and_shift(df_5m, "5m")
+    df_15m = tag_and_shift(df_15m, "15m")
+    df_30m = tag_and_shift(df_30m, "30m")
     df_1h = tag_and_shift(df_1h, "1h")
     df_4h = tag_and_shift(df_4h, "4h")
     df_1d = tag_and_shift(df_1d, "1d")
     
     #df_1h = df_1h.sort_values("time")
-    df_15m = df_15m.sort_values("time")
-    merged = pd.merge_asof(df_15m, df_1h, on="time", direction="backward")
+    df_1m = df_1m.sort_values("time")
+
+    #merged = pd.merge_asof(df_15m, df_1h, on="time", direction="backward")
+    merged = pd.merge_asof(df_1m, df_5m, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_15m, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_30m, on="time", direction="backward")
+    merged = pd.merge_asof(merged, df_1h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_4h, on="time", direction="backward")
     #merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
     return merged.reset_index(drop=True)
+# ── Run ────────────────────────────────────────────────────────────────────────
+
+
 """
 def build_multi_tf(symbol, bars=None):
     if not mt5.initialize(args.terminal):
@@ -253,7 +271,7 @@ def _run_training():
 
     try:
         # ── Fetch & merge multi-timeframe data ──────────────────────────────
-        df = build_multi_tf(args.symbol)
+        df = build_multi_tf(args.symbol)[-300000:].reset_index(drop=True)
         print(f"  Multi-TF merge complete: {len(df):,} rows, {len(df.columns)} columns")
 
         # ── Calendar features ───────────────────────
@@ -286,10 +304,10 @@ def _run_training():
         # ── Labelling ───────────────────────────────
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
-            zigzag_atr_mult = 5,
-            hold_bars       = 5,
-            min_streak      = 1.5,
-            target_hold_pct = 1.5,
+            zigzag_atr_mult = 3,
+            hold_bars       = 3,
+            min_streak      = 1.25,
+            target_hold_pct = 1.25,
         )
         df = labeler.label(df)
         #df = fix_pivot_labels(df)
