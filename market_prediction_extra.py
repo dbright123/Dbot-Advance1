@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrade
 parser.add_argument("--terminal", default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
 parser.add_argument("--symbol", default = "XAUUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
-parser.add_argument("--retrain-interval", type=int, default=(60 * 24), help="Minutes between automatic retrains  (default: 1 day)")
+parser.add_argument("--retrain-interval", type=int, default=(60 * 2), help="Minutes between automatic retrains  (default: 1 day)")
 parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier to train (default et = ExtraTrees, best profit in walk-forward comparison)")
 parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
@@ -232,8 +232,8 @@ def make_model(name):
     walk-forward model comparison."""
     name = (name or "et").lower()
     if name == "rf":
-        return RandomForestClassifier(n_estimators=350, class_weight="balanced",
-                                      random_state=42, n_jobs=3, verbose= 1)
+        return RandomForestClassifier(n_estimators=400, class_weight="balanced",
+                                      random_state=42, n_jobs=2, verbose= 1)
     if name == "hgb":
         return HistGradientBoostingClassifier(random_state=42, max_iter=300, learning_rate=0.08)
     if name == "gb":
@@ -302,10 +302,12 @@ def _run_training():
 
         """
         # ── Labelling ───────────────────────────────
+        
+
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
             zigzag_atr_mult = 3,
-            hold_bars       = 3,
+            hold_bars       = 4,
             min_streak      = 1.25,
             target_hold_pct = 1.25,
         )
