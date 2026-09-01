@@ -47,13 +47,9 @@ print("MetaTrader5 package version: ", mt5.__version__)
 
 FEATURE_NAMES = [
     'open', 'high', 'low', 'close', 'volume',
-    'open_5m', 'high_5m', 'low_5m', 'close_5m', 'volume_5m',
-    'open_15m', 'high_15m', 'low_15m', 'close_15m', 'volume_15m',
-    'open_30m', 'high_30m', 'low_30m', 'close_30m', 'volume_30m',
-    'open_1h', 'high_1h', 'low_1h', 'close_1h', 'volume_1h',
     'open_4h', 'high_4h', 'low_4h', 'close_4h', 'volume_4h',
     'open_1d', 'high_1d', 'low_1d', 'close_1d', 'volume_1d',
-    'hour','minute', 'day', 'month', 'day_of_week'
+    'hour','day', 'month', 'day_of_week'
 ]
 
 # ── Shared training state (all access protected by a lock) ──
@@ -94,10 +90,7 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
 def build_multi_tf(symbol):
     if not mt5.initialize(args.terminal):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
-    df_1m = fetch_rates(symbol, mt5.TIMEFRAME_M1, 9_000_000).reset_index()
-    df_5m = fetch_rates(symbol, mt5.TIMEFRAME_M5, 9_000_000).reset_index()
-    df_15m = fetch_rates(symbol, mt5.TIMEFRAME_M15, 9_000_000).reset_index()
-    df_30m = fetch_rates(symbol, mt5.TIMEFRAME_M30, 9_000_000).reset_index()
+    
     df_1h = fetch_rates(symbol, mt5.TIMEFRAME_H1, 9_000_000).reset_index()
     df_4h = fetch_rates(symbol, mt5.TIMEFRAME_H4, 9_000_000).reset_index()
     df_1d = fetch_rates(symbol, mt5.TIMEFRAME_D1, 9_000_000).reset_index()
@@ -110,23 +103,14 @@ def build_multi_tf(symbol):
         return df
 
     
-    df_5m = tag_and_shift(df_5m, "5m")
-    df_15m = tag_and_shift(df_15m, "15m")
-    df_30m = tag_and_shift(df_30m, "30m")
-    df_1h = tag_and_shift(df_1h, "1h")
+
     df_4h = tag_and_shift(df_4h, "4h")
     df_1d = tag_and_shift(df_1d, "1d")
     
-    #df_1h = df_1h.sort_values("time")
-    df_1m = df_1m.sort_values("time")
-
-    #merged = pd.merge_asof(df_15m, df_1h, on="time", direction="backward")
-    merged = pd.merge_asof(df_1m, df_5m, on="time", direction="backward")
-    merged = pd.merge_asof(merged, df_15m, on="time", direction="backward")
-    merged = pd.merge_asof(merged, df_30m, on="time", direction="backward")
-    merged = pd.merge_asof(merged, df_1h, on="time", direction="backward")
-    merged = pd.merge_asof(merged, df_4h, on="time", direction="backward")
-    #merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
+    df_1h = df_1h.sort_values("time")
+    
+    #merged = pd.merge_asof(merged, df_4h, on="time", direction="backward")
+    merged = pd.merge_asof(df_1h, df_4h, on="time", direction="backward")
     merged = pd.merge_asof(merged, df_1d, on="time", direction="backward")
     return merged.reset_index(drop=True)
 # ── Run ────────────────────────────────────────────────────────────────────────
