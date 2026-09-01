@@ -271,7 +271,7 @@ def _run_training():
 
     try:
         # ── Fetch & merge multi-timeframe data ──────────────────────────────
-        df = build_multi_tf(args.symbol)[-300000:].reset_index(drop=True)
+        df = build_multi_tf(args.symbol)[-600000:].reset_index(drop=True)
         print(f"  Multi-TF merge complete: {len(df):,} rows, {len(df.columns)} columns")
 
         # ── Calendar features ───────────────────────
@@ -307,9 +307,9 @@ def _run_training():
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
             zigzag_atr_mult = 3,
-            hold_bars       = 4,
-            min_streak      = 1.25,
-            target_hold_pct = 1.25,
+            hold_bars       = 3,
+            min_streak      = 1.5,
+            target_hold_pct = 1.5,
         )
         df = labeler.label(df)
         #df = fix_pivot_labels(df)
