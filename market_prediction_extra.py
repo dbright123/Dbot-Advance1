@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrade
 parser.add_argument("--terminal", default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
 parser.add_argument("--symbol", default = "XAUUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--port",      type=int, default=5000, help="Port for the Flask server  (default: 5000)")
-parser.add_argument("--retrain-interval", type=int, default=(60 * 2), help="Minutes between automatic retrains  (default: 1 day)")
+parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
 parser.add_argument("--model", default="rf", choices=["et", "rf", "hgb", "gb", "logit"],
                     help="classifier to train (default et = ExtraTrees, best profit in walk-forward comparison)")
 parser.add_argument("--features", default="raw", choices=["engineered", "raw"],
@@ -290,8 +290,8 @@ def _run_training():
 
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
-            zigzag_atr_mult = 3,
-            hold_bars       = 3,
+            zigzag_atr_mult = 4,
+            hold_bars       = 5,
             min_streak      = 1.5,
             target_hold_pct = 1.5,
         )
