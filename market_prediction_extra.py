@@ -290,14 +290,13 @@ def _run_training():
 
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
-            zigzag_atr_mult = 4,
-            hold_bars       = 5,
-            min_streak      = 1.5,
-            target_hold_pct = 1.5,
+            zigzag_atr_mult = 6,
+            hold_bars       = 10,
+            min_streak      = 2,
+            target_hold_pct = 3,
         )
         df = labeler.label(df)
-        #df = fix_pivot_labels(df)
-        
+                
         # ── Feature set (engineered = stationary returns/ratios) ─────
         global active_features
         if args.features == 'engineered':
