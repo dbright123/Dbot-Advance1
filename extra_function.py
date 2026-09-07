@@ -23,7 +23,7 @@ def engineer_features(df):
     # --- New Additions ---
     # Extract hour (0-23)
     df['hour'] = df['time'].dt.hour
-    #df["minute"] = df['time'].dt.minute
+    df["minute"] = df['time'].dt.minute
     df['day_of_week'] = df['time'].dt.day_of_week
 
     #df['t_price'] = (df['open'] + df['close'])/2
