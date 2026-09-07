@@ -3390,7 +3390,7 @@ def label_optimal_positions(
     transaction_cost=0.0001,   # cost per one-way trade as fraction of price
     holding_penalty=0.0,       # optional per-bar penalty for being long/short
     allow_short=True,
-    verbose=False
+    verbose=True
 ):
     """
     Viterbi forward-backward labeling.
