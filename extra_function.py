@@ -26,7 +26,7 @@ def engineer_features(df):
     df["minute"] = df['time'].dt.minute
     df['day_of_week'] = df['time'].dt.day_of_week
 
-    #df['t_price'] = (df['open'] + df['close'])/2
+    df['a_price'] = (df['open'] + df['close'] + df['high'] + df['low'])/4
     #df['hl_price'] = (df['high'] + df['low'])/2
 
 
@@ -583,7 +583,7 @@ def plot_signals(df):
     fig, ax = plt.subplots(figsize=(15, 8))
 
     # Plot close price
-    ax.plot(df.index, df['close'], label='Close Price', color='blue', alpha=0.6)
+    ax.plot(df.index, df['a_price'], label='Close Price', color='blue', alpha=0.6)
 
 
 
