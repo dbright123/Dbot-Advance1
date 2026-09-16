@@ -242,10 +242,10 @@ def _run_training():
 
         labeler = RobustPriceLabelerV3(
             atr_period      = 14,
-            zigzag_atr_mult = 6,
-            hold_bars       = 10,
+            zigzag_atr_mult = 2,
+            hold_bars       = 2,
             min_streak      = 2,
-            target_hold_pct = 3,
+            target_hold_pct = 2,
         )
         df = labeler.label(df)
                 
