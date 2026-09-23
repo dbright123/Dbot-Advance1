@@ -27,7 +27,7 @@ from extra_function import fix_pivot_labels
 
 parser = argparse.ArgumentParser(description="ML Prediction Server for MetaTrader 5")
 parser.add_argument("--terminal", default = "C:\\Program Files\\MetaTrader 5\\terminal64.exe", required=False,  help="Full path to terminal64.exe  e.g. C:\\Program Files\\MetaTrader 5\\terminal64.exe")
-parser.add_argument("--symbol", default = "GBPUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
+parser.add_argument("--symbol", default = "XAUUSD", required=False,  help="Trading symbol to fetch data for  e.g. XAUUSD")
 parser.add_argument("--n-prev", type=int, default=2, help="Number of previous time steps to include as features  (default: 2)")
 parser.add_argument("--port",      type=int, default=3456, help="Port for the Flask server  (default: 5000)")
 parser.add_argument("--retrain-interval", type=int, default=(60), help="Minutes between automatic retrains  (default: 1 day)")
@@ -72,7 +72,7 @@ training_error       = None          # last error message, if any
 import MetaTrader5 as mt5
 import pandas as pd
 
-def fetch_rates(symbol, timeframe, count=9_000_000):
+def fetch_rates(symbol, timeframe, count=300000):
     """Pull rates from MT5 and return a tidy DataFrame."""
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
     
@@ -89,7 +89,7 @@ def fetch_rates(symbol, timeframe, count=9_000_000):
     if vol_col is None:
         raise KeyError(f"No volume column found among: {list(df.columns)}")
     
-    df = df[["time", "open", "high", "low", "close", vol_col]].copy()
+    df = df[["time", "open", "high", "low", "close", vol_col]].astype(np.float32)
     df.rename(columns={vol_col: "volume"}, inplace=True)
     #df["time"] = pd.to_datetime(df["time"], unit="s")
     return df.set_index("time")
@@ -99,7 +99,7 @@ def build_lagged_data(symbol, n_prev=2):
         raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
     
     # Fetch 1‑hour data (adjust count as needed)
-    df = fetch_rates(symbol, mt5.TIMEFRAME_M15, 9_000_000).reset_index()
+    df = fetch_rates(symbol, mt5.TIMEFRAME_M15).reset_index()
 
     # Ensure chronological order
     df = df.sort_values("time")
